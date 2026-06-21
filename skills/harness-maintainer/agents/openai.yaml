@@ -1,0 +1,4 @@
+interface:
+  display_name: "Harness Maintainer"
+  short_description: "维护个人 Research Harness 文件体系"
+  default_prompt: "请使用这个 skill 审查并修改本地 Research Harness 文件，先诊断再提出修改方案，再做小范围可审查的文件修改。"
