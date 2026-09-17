@@ -1,0 +1,9 @@
+source_name,platform,source_type,period_hint,priority,use_for_sampling_frame,use_for_text,notes
+JJWXC official catalog,jjwxc,official_catalog,2010-2025,1,yes,no,Primary candidate for publication-cohort bibliography; annual filter and pagination still need live validation
+Qidian official all-books catalog,qidian,official_catalog,2010-2025,1,yes,no,Primary current catalog; historical publication-date recovery needs validation
+wanfb/Text-Mining-of-Qidian-Website,qidian,github_snapshot,2019,1,supplement,no,Project reports 22912 book records; raw master dataset not yet located in repo
+notnotype/qidian,qidian,github_crawler,2020,2,no,no,Useful crawler logic for category/subcategory pagination; old selectors may require revision
+GOLEM-lab/Qidian_Webnovel_DataCollection,qidian,academic_dataset,pre-2024,1,supplement,supplement,Provides stable Qidian book IDs and collection code; selected translated/completed works only
+GuoFeng-Webnovel,qidian_or_china_literature,authorized_text_corpus,2023-2024,2,no,yes,Continuous chapters from 179 works; requires metadata linkage for longitudinal use
+positivepeng/NovelSpider,jjwxc,github_crawler,2019,2,no,no,Older JJWXC Scrapy implementation useful for parser comparison
+BlevefAU/jj-crawler,jjwxc,github_crawler,2021,2,no,no,Metadata schema includes ID title description categories author word count status; lacks publication date
