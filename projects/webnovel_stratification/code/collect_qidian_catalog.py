@@ -13,7 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, build_opener, HTTPCookieProcessor\nfrom http.cookiejar import CookieJar
+from urllib.request import Request, build_opener, HTTPCookieProcessor
+from http.cookiejar import CookieJar
 
 BASE="https://m.qidian.com/webcommon/category/list"
 UA="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
@@ -101,7 +102,8 @@ def main():
         referer="https://m.qidian.com/category/"
         log={"url":url,"gender":a.gender,"page":page,"started_at":utcnow()}
         try:
-            if opener is None: raise ValueError("session_prime_failed")\n            status,ctype,body,obj=fetch_json(opener,url,referer)
+            if opener is None: raise ValueError("session_prime_failed")
+            status,ctype,body,obj=fetch_json(opener,url,referer)
             rows,meta=parse(obj,a.gender,page)
             log.update(status=status,content_type=ctype,bytes=len(body),sha256=hashlib.sha256(body).hexdigest(),api_code=meta.get("code"),records=len(rows))
             pages.append({"gender":a.gender,"page":page,**meta})
