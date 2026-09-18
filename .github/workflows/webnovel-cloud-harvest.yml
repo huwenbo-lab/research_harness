@@ -1,6 +1,9 @@
 name: Daily bounded JJWXC catalog harvest
 
 on:
+  push:
+    branches: [project/webnovel-stratification-pilot]
+    paths: [.github/workflows/webnovel-cloud-harvest.yml]
   schedule:
     - cron: '23 19 * * *'
   workflow_dispatch:
