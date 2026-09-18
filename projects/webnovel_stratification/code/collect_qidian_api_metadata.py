@@ -342,7 +342,9 @@ def main():
       "requested_seed_count":len(seeds),"completed_work_count":len(records),
       "works_with_title":sum(bool((x.get("info") or {}).get("title")) for x in records),
       "works_with_catalog":sum((x.get("chapter_count") or 0)>0 for x in records),
-      "chapter_rows":len(chapters),\n      "works_with_exact_ending_chapter_date":sum(bool((x.get("ending_chapter_date_metadata") or {}).get("date_published")) for x in records),\n      "blocked_hosts":sorted(blocked_hosts),
+      "chapter_rows":len(chapters),
+      "works_with_exact_ending_chapter_date":sum(bool((x.get("ending_chapter_date_metadata") or {}).get("date_published")) for x in records),
+      "blocked_hosts":sorted(blocked_hosts),
       "created_at":utcnow(),
       "scope":"public bibliographic/chapter-catalog metadata only; no chapter content endpoint called",
     }
