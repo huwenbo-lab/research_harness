@@ -44,8 +44,11 @@ def choose_ids(db: Path, offset: int, limit: int) -> list[dict]:
         """
         SELECT platform_work_id,title,author,status_raw,work_url
         FROM work_master
-        WHERE platform='jjwxc' AND platform_work_id GLOB '[0-9]*'
-        ORDER BY CAST(platform_work_id AS INTEGER)
+        WHERE platform='jjwxc'
+          AND platform_work_id GLOB '[0-9]*'
+          AND genre_raw IS NOT NULL
+          AND genre_raw LIKE '%-%'
+        ORDER BY COALESCE(platform_declared_pub_year,9999), CAST(platform_work_id AS INTEGER)
         """
     ).fetchall()
     con.close()
@@ -93,11 +96,25 @@ def compact(parsed: dict, html_hash: str, html_bytes: int, seed: dict, url: str)
     chapters = parsed.get("chapters", [])
     first = chapters[0] if chapters else None
     last = chapters[-1] if chapters else None
+    endings = completion_candidates(parsed)
+    status = parsed.get("status") or seed.get("status_raw")
+    if status and any(x in status for x in ("完结", "已完成")) and last:
+        candidate_date = last.get("publish_time_as_supplied") or last.get("update_time_as_supplied")
+        if candidate_date:
+            endings.append({
+                "chapter_number": last.get("chapter_number_raw"),
+                "chapter_title": last.get("chapter_title"),
+                "role": "completed_status_last_visible_chapter",
+                "date_candidate": candidate_date,
+                "basis": "explicit_chapter_publication_under_completed_status"
+                         if last.get("publish_time_as_supplied")
+                         else "chapter_update_under_completed_status",
+            })
     return {
         "work_id": parsed.get("work_id"),
         "title": parsed.get("title") or seed.get("title"),
         "author": parsed.get("author") or seed.get("author"),
-        "status": parsed.get("status") or seed.get("status_raw"),
+        "status": status,
         "url": url,
         "observed_at": utcnow(),
         "chapter_count_observed": len(chapters),
@@ -105,7 +122,7 @@ def compact(parsed: dict, html_hash: str, html_bytes: int, seed: dict, url: str)
         "first_chapter_update_date": first.get("update_time_as_supplied") if first else None,
         "last_chapter_publication_date": last.get("publish_time_as_supplied") if last else None,
         "last_chapter_update_date": last.get("update_time_as_supplied") if last else None,
-        "completion_candidates": completion_candidates(parsed),
+        "completion_candidates": endings,
         "date_meta": parsed.get("date_meta"),
         "metadata_lines": parsed.get("metadata_lines"),
         "chapters": chapters,
