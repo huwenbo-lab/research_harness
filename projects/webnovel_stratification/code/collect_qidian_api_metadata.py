@@ -235,10 +235,13 @@ def main():
             except Exception as e: log["error"]=repr(e)
             logs.append(log); time.sleep(max(2,args.delay))
 
-        for kind,url in (
+        # The mobile catalog currently provides the full public chapter list.
+        # Only try legacy JSON catalog endpoints when the mobile catalog yields no rows.
+        fallback_targets=() if any(rows for _,rows in catalog_candidates) else (
           ("read_ajax_catalog",f"https://read.qidian.com/ajax/book/category?bookId={wid}"),
           ("book_ajax_catalog",f"https://book.qidian.com/ajax/book/category?bookId={wid}"),
-        ):
+        )
+        for kind,url in fallback_targets:
             host=urlparse(url).hostname
             if host in blocked_hosts: continue
             log={"work_id":wid,"kind":kind,"url":url,"started_at":utcnow()}
