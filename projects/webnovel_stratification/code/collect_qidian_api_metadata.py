@@ -126,6 +126,35 @@ def parse_mobile_book(body: bytes, wid: str, url: str):
       "note":"HTML parsed transiently for metadata only; not retained."
     }
 
+def parse_chapter_jsonld(body: bytes, wid: str, chapter_id: str, url: str):
+    soup=BeautifulSoup(body,"html.parser")
+    for node in soup.find_all("script",attrs={"type":"application/ld+json"}):
+        raw=node.string or node.get_text()
+        if not raw: continue
+        try: obj=json.loads(raw)
+        except Exception: continue
+        candidates=[]
+        if isinstance(obj,dict):
+            candidates.extend(obj.get("@graph") or [])
+            candidates.append(obj)
+        elif isinstance(obj,list):
+            candidates.extend(obj)
+        for x in candidates:
+            if not isinstance(x,dict) or x.get("@type")!="Chapter": continue
+            xid=str(x.get("@id") or x.get("url") or "")
+            if str(wid) not in xid or (chapter_id and str(chapter_id) not in xid): continue
+            return {
+              "book_id":wid,"chapter_id":str(chapter_id),"chapter_title":x.get("name"),
+              "date_published":x.get("datePublished"),"date_modified":x.get("dateModified"),
+              "word_count":x.get("wordCount"),"source_url":url,
+              "structured_data_basis":"schema.org Chapter JSON-LD",
+              "html_sha256":hashlib.sha256(body).hexdigest(),
+              "html_bytes_transient":len(body),
+              "note":"Chapter HTML parsed transiently for date metadata only; prose is not retained."
+            }
+    return None
+
+
 def parse_mobile_catalog(body: bytes, wid: str, base: str):
     soup=BeautifulSoup(body,"html.parser"); raw=[]; pos=0
     date_re=re.compile(r"(?:19|20)\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
@@ -262,9 +291,43 @@ def main():
         rec["catalog_source"]=best[0]; rec["chapter_count"]=len(best[1])
         rec["first_chapter"]=best[1][0] if best[1] else None
         rec["last_chapter"]=best[1][-1] if best[1] else None
-        ending_re=re.compile(r"全文完|全书完|正文完|大结局|终章|完结章")
+        ending_re=re.compile(r"全文完|全书完|正文完|大结局|终章|完结章|最终章|最终回|全剧终")
         ending_rows=[x for x in best[1] if ending_re.search(x.get("chapter_title") or "")]
         rec["ending_chapter_candidate"]=ending_rows[-1] if ending_rows else None
+
+        # For books explicitly marked complete, request at most one public ending
+        # chapter page and retain only its schema.org date metadata.
+        info=rec.get("info") or {}
+        ending=rec.get("ending_chapter_candidate")
+        if info.get("status") and "完" in str(info.get("status")) and ending and ending.get("url"):
+            eurl=ending["url"]
+            if urlparse(eurl).hostname=="m.qidian.com":
+                elog={"work_id":wid,"kind":"ending_chapter_metadata","url":eurl,"started_at":utcnow()}
+                try:
+                    status,ctype,ebody=fetch(eurl,"text/html,application/xhtml+xml,*/*;q=0.8",book_url)
+                    challenged=page_is_challenge(ebody)
+                    exact=None if challenged else parse_chapter_jsonld(
+                        ebody,wid,str(ending.get("chapter_id") or ""),eurl
+                    )
+                    elog.update(
+                      status=status,content_type=ctype,bytes=len(ebody),
+                      sha256=hashlib.sha256(ebody).hexdigest(),
+                      challenged=challenged,parsed_date=bool(exact and exact.get("date_published"))
+                    )
+                    if exact: rec["ending_chapter_date_metadata"]=exact
+                    rec["routes"].append({
+                      "kind":"ending_chapter_metadata","status":status,
+                      "challenged":challenged,
+                      "parsed_date":bool(exact and exact.get("date_published"))
+                    })
+                    if challenged or status in BLOCK: blocked_hosts.add("m.qidian.com")
+                except HTTPError as e:
+                    elog.update(status=e.code,error=repr(e))
+                    if e.code in BLOCK: blocked_hosts.add("m.qidian.com")
+                except Exception as e:
+                    elog["error"]=repr(e)
+                logs.append(elog); time.sleep(max(2,args.delay))
+
         chapters.extend(best[1]); records.append(rec)
 
         (out/"retrieval_log.json").write_text(json.dumps(logs,ensure_ascii=False,indent=2),encoding="utf-8")
@@ -279,7 +342,7 @@ def main():
       "requested_seed_count":len(seeds),"completed_work_count":len(records),
       "works_with_title":sum(bool((x.get("info") or {}).get("title")) for x in records),
       "works_with_catalog":sum((x.get("chapter_count") or 0)>0 for x in records),
-      "chapter_rows":len(chapters),"blocked_hosts":sorted(blocked_hosts),
+      "chapter_rows":len(chapters),\n      "works_with_exact_ending_chapter_date":sum(bool((x.get("ending_chapter_date_metadata") or {}).get("date_published")) for x in records),\n      "blocked_hosts":sorted(blocked_hosts),
       "created_at":utcnow(),
       "scope":"public bibliographic/chapter-catalog metadata only; no chapter content endpoint called",
     }
