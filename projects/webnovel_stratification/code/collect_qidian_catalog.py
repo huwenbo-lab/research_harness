@@ -16,7 +16,8 @@ from urllib.parse import urlencode
 from urllib.request import Request, build_opener, HTTPCookieProcessor
 from http.cookiejar import CookieJar
 
-BASE="https://m.qidian.com/webcommon/category/list"\nMALE_CATEGORIES={"21":"玄幻","22":"仙侠","4":"都市","15":"现实","5":"历史","7":"游戏","9":"科幻","10":"悬疑","12":"N次元"}
+BASE="https://m.qidian.com/webcommon/category/list"
+MALE_CATEGORIES={"21":"玄幻","22":"仙侠","4":"都市","15":"现实","5":"历史","7":"游戏","9":"科幻","10":"悬疑","12":"N次元"}
 UA="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 BLOCK=(202,401,403,429)
 
