@@ -5,7 +5,7 @@ on:
     branches: [project/webnovel-stratification-pilot]
     paths:
       - .github/workflows/webnovel-qidian-cloud.yml
-      - projects/webnovel_stratification/code/collect_qidian_public_metadata.py
+      - projects/webnovel_stratification/code/collect_qidian_api_metadata.py
   schedule:
     - cron: '47 20 * * *'
   workflow_dispatch:
@@ -17,7 +17,7 @@ permissions:
 jobs:
   qidian:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -31,25 +31,21 @@ jobs:
           github-token: ${{ github.token }}
           path: baseline
 
-      - name: Install browser collector
-        run: |
-          python -m pip install 'playwright>=1.52,<2'
-          python -m playwright install --with-deps chromium
-          python -m py_compile projects/webnovel_stratification/code/collect_qidian_public_metadata.py
+      - name: Validate collector
+        run: python -m py_compile projects/webnovel_stratification/code/collect_qidian_api_metadata.py
 
-      - name: Collect one bounded public metadata batch
+      - name: Collect one bounded public JSON metadata batch
         shell: bash
         run: |
           DAY_INDEX="$(( $(date -u +%s) / 86400 ))"
-          OFFSET="$(( (DAY_INDEX * 12) % 3345 ))"
+          OFFSET="$(( (DAY_INDEX * 50) % 3345 ))"
           echo "offset=$OFFSET" >> "$GITHUB_ENV"
-          python projects/webnovel_stratification/code/collect_qidian_public_metadata.py \
+          python projects/webnovel_stratification/code/collect_qidian_api_metadata.py \
             --baseline baseline \
             --out qidian-cloud \
             --offset "$OFFSET" \
-            --limit 12 \
-            --wait-ms 2500 \
-            --delay-ms 5000
+            --limit 50 \
+            --delay 3
 
       - name: Upload structured metadata only
         if: always()
