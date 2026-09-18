@@ -1,0 +1,48 @@
+name: Daily bounded JJWXC catalog harvest
+
+on:
+  schedule:
+    - cron: '23 19 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  catalog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: project/webnovel-stratification-pilot
+          persist-credentials: false
+
+      - name: Install parser dependency
+        run: python -m pip install 'beautifulsoup4>=4.12,<5'
+
+      - name: Choose one year and collect a bounded page sample
+        shell: bash
+        run: |
+          RUN_DAY="$(date -u +%Y%m%d)"
+          DAY_INDEX="$(( $(date -u +%s) / 86400 ))"
+          YEAR="$(( 2005 + (DAY_INDEX % 21) ))"
+          echo "run_day=$RUN_DAY" >> "$GITHUB_ENV"
+          echo "target_year=$YEAR" >> "$GITHUB_ENV"
+          python projects/webnovel_stratification/code/collect_catalog.py \
+            --out "cloud-harvest/jjwxc-${RUN_DAY}-${YEAR}" \
+            --start "$YEAR" \
+            --end "$YEAR" \
+            --pages-per-year 5 \
+            --seed "$RUN_DAY" \
+            --delay 5
+
+      - name: Upload immutable raw batch
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jjwxc-daily-${{ github.run_id }}-${{ env.target_year }}
+          path: cloud-harvest/
+          retention-days: 90
+          if-no-files-found: error
+          compression-level: 6
