@@ -128,13 +128,13 @@ def parse_mobile_book(body: bytes, wid: str, url: str):
 
 def parse_mobile_catalog(body: bytes, wid: str, base: str):
     soup=BeautifulSoup(body,"html.parser"); raw=[]; pos=0
-    date_re=re.compile(r"(?:19|20)\\d{2}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}")
+    date_re=re.compile(r"(?:19|20)\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
     for a in soup.find_all("a",href=True):
         href=urljoin(base,a["href"]); title=a.get_text(" ",strip=True)
         if not title or wid not in href: continue
         p=urlparse(href).path.lower()
         if "/chapter/" not in p and "/read/" not in p: continue
-        nums=re.findall(r"\\d+",p); cid=nums[-1] if nums else href
+        nums=re.findall(r"\d+",p); cid=nums[-1] if nums else href
         dm=date_re.search(title)
         raw.append({
           "book_id":wid,"chapter_id":cid,"chapter_title":title[:300],"url":href,
