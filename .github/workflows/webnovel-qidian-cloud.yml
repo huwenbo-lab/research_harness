@@ -38,14 +38,18 @@ jobs:
         shell: bash
         run: |
           DAY_INDEX="$(( $(date -u +%s) / 86400 ))"
-          OFFSET="$(( (DAY_INDEX * 50) % 3345 ))"
+          OFFSET="$(( DAY_INDEX * 50 ))"
+          LIMIT=50
+          DELAY=3
+          if [ "${{ github.event_name }}" = "push" ]; then LIMIT=2; DELAY=2; fi
           echo "offset=$OFFSET" >> "$GITHUB_ENV"
+          echo "limit=$LIMIT" >> "$GITHUB_ENV"
           python projects/webnovel_stratification/code/collect_qidian_api_metadata.py \
             --baseline baseline \
             --out qidian-cloud \
             --offset "$OFFSET" \
-            --limit 50 \
-            --delay 3
+            --limit "$LIMIT" \
+            --delay "$DELAY"
 
       - name: Upload structured metadata only
         if: always()
