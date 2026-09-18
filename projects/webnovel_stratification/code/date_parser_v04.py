@@ -1,7 +1,8 @@
-"""Conservative date-role extraction from official metadata and chapter tables.
+"""Extract explicit chapter publication and update timestamps separately.
 
-Dates on chapter lists are updates unless the page explicitly labels otherwise.
-Ending-title markers are candidates, never independently verified completion dates.
+Public JJWXC chapter table title attributes explicitly label publication and draft
+storage times. Ending-title markers are candidates, not verified completion dates.
+Only metadata is parsed; VIP URLs are recorded but never followed for paid text.
 """
 from __future__ import annotations
 import re
@@ -50,24 +51,47 @@ def parse_jj_detail(body:bytes,work_id:str,url:str):
     for s in chunks:
         if s.startswith('文章进度'):status=s.split('：',1)[-1].split(':',1)[-1].strip()
     chapters=[];seen=set()
-    for a in soup.find_all('a',href=True):
-        u=urljoin(url,a['href']);q=parse_qs(urlparse(u).query)
-        if q.get('novelid')!=[work_id] or not q.get('chapterid',[''])[0].isdigit():continue
-        cid=q['chapterid'][0];tr=a.find_parent('tr')
-        if tr is None or cid in seen:continue
+    for tr in soup.find_all('tr'):
         cells=tr.find_all('td',recursive=False)
         if len(cells)<3:continue
-        dates=[]
+        ordinal=text(cells[0].get_text())
+        if not ordinal.isdigit():continue
+        worklink=None;cid='';u=''
+        for a in tr.find_all('a'):
+            rel=a.get('rel');rel=' '.join(rel) if isinstance(rel,list) else rel
+            href=a.get('href') or rel or ''
+            candidate=urljoin(url,href);q=parse_qs(urlparse(candidate).query)
+            if q.get('novelid')==[work_id] and q.get('chapterid',[''])[0].isdigit():
+                worklink=a;cid=q['chapterid'][0];u=candidate;break
+        if worklink is None:
+            if tr.get('itemprop')!='chapter':continue
+            title_el=tr.select_one('[itemprop="headline"]')
+            ch_title=text(title_el.get_text(' ',strip=True)) if title_el else text(cells[1].get_text(' ',strip=True))
+        else:ch_title=text(worklink.get_text(' ',strip=True))
+        if ordinal in seen:continue
+        dates=[];published=None;draft=None;tooltip=[]
         for td in cells:
             ds=date_value(td.get_text(' ',strip=True))
             if ds:dates.append((ds,text(td.get_text(' ',strip=True))))
-        if not dates:continue
-        ch_title=text(a.get_text(' ',strip=True));updated,raw=dates[-1]
-        seen.add(cid)
-        chapters.append(dict(chapter_id=cid,chapter_number_raw=text(cells[0].get_text()),chapter_title=ch_title,
-            chapter_url=u,word_count_raw=text(cells[-2].get_text()) if len(cells)>3 else None,
-            update_time_as_supplied=updated,date_raw=raw,
-            date_semantics='official_chapter_list_update_not_first_publication',end_role=end_role(ch_title)))
-    chapters.sort(key=lambda c:int(c['chapter_id']))
+            for el in [td]+td.find_all(title=True):
+                tip=el.get('title','')
+                if '章节首发时间' in tip:
+                    tooltip.append(tip)
+                    m=re.search(r'章节首发时间\s*[：:]\s*([^\r\n]+)',tip)
+                    if m:published=date_value(m.group(1))
+                    m=re.search(r'章节存稿时间\s*[：:]\s*([^\r\n]+)',tip)
+                    if m:draft=date_value(m.group(1))
+        if not dates and published is None:continue
+        updated,raw=dates[-1] if dates else (None,None)
+        wc=tr.select_one('[itemprop="wordCount"]')
+        seen.add(ordinal)
+        chapters.append(dict(chapter_id=cid,chapter_number_raw=ordinal,chapter_title=ch_title,
+            chapter_url=u or None,word_count_raw=text(wc.get_text()) if wc else None,
+            publish_time_as_supplied=published,draft_time_as_supplied=draft,
+            publication_evidence_raw='\n'.join(tooltip) or None,
+            update_time_as_supplied=updated,date_raw=raw,is_vip_as_supplied=int('[VIP]' in tr.get_text()),
+            date_semantics='official_explicit_chapter_publication_and_update' if published else 'official_chapter_list_update_not_first_publication',
+            end_role=end_role(ch_title)))
+    chapters.sort(key=lambda c:int(c['chapter_number_raw']))
     return dict(work_id=work_id,title=title,author=author,status=status,metadata_fields=fields,date_meta=date_meta,
                 metadata_lines=chunks,chapters=chapters,encoding=soup.original_encoding)
