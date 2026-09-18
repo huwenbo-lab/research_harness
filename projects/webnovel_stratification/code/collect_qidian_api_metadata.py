@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Collect public Qidian bibliographic and catalog metadata from JSON endpoints.
+"""Collect public Qidian bibliographic and chapter-catalog metadata.
 
-No chapter content endpoint is called. No login cookie, CAPTCHA solving, stealth,
+Routes tried are public mobile/static metadata pages and catalog endpoints only.
+No chapter-content endpoint is called. No login cookie, CAPTCHA solving, stealth,
 or access-control bypass is used.
 """
 from __future__ import annotations
@@ -15,13 +16,14 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
-UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/153 Safari/537.36"
-INFO = "https://qqapp.qidian.com/ajax/book/info"
-CATALOG = "https://qqapp.qidian.com/ajax/book/category"
+from bs4 import BeautifulSoup
+
+UA_MOBILE = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 BLOCK = (202, 401, 403, 429)
+CHALLENGE = ("验证码","安全验证","访问过于频繁","请求异常","请完成验证","captcha","challenge")
 
 
 def utcnow():
@@ -29,198 +31,218 @@ def utcnow():
 
 
 def find_db(root: Path) -> Path:
-    hits = list(root.rglob("webnovel_catalog.sqlite"))
-    if not hits:
-        raise FileNotFoundError("webnovel_catalog.sqlite not found")
+    hits=list(root.rglob("webnovel_catalog.sqlite"))
+    if not hits: raise FileNotFoundError("webnovel_catalog.sqlite not found")
     return hits[0]
 
 
 def choose_ids(db: Path, offset: int, limit: int):
-    con = sqlite3.connect(db)
-    con.row_factory = sqlite3.Row
-    rows = con.execute(
-        """
-        SELECT platform_work_id,title,author,status_raw,work_url
-        FROM work_master
-        WHERE platform='qidian' AND platform_work_id GLOB '[0-9]*'
-        ORDER BY CAST(platform_work_id AS INTEGER)
-        """
-    ).fetchall()
+    con=sqlite3.connect(db); con.row_factory=sqlite3.Row
+    rows=con.execute("""
+      SELECT platform_work_id,title,author,status_raw,work_url
+      FROM work_master
+      WHERE platform='qidian' AND platform_work_id GLOB '[0-9]*'
+      ORDER BY CAST(platform_work_id AS INTEGER)
+    """).fetchall()
     con.close()
-    if not rows:
-        return []
-    start = offset % len(rows)
-    return [dict(rows[(start+i) % len(rows)]) for i in range(min(limit, len(rows)))]
+    if not rows: return []
+    start=offset%len(rows)
+    return [dict(rows[(start+i)%len(rows)]) for i in range(min(limit,len(rows)))]
 
 
-def get_json(url: str, referer: str = "https://m.qidian.com/"):
-    req = Request(
-        url,
-        headers={
-            "User-Agent": UA,
-            "Accept": "application/json,text/plain,*/*",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
-            "Referer": referer,
-        },
-    )
-    with urlopen(req, timeout=20) as r:
-        status = r.status
-        body = r.read(20 * 1024 * 1024 + 1)
-        ctype = r.headers.get("Content-Type", "")
-    if len(body) > 20 * 1024 * 1024:
-        raise ValueError("size_limit")
-    if status != 200:
-        raise HTTPError(url, status, "unexpected status", {}, None)
-    obj = json.loads(body.decode("utf-8", "replace"))
-    return status, ctype, body, obj
+def fetch(url: str, accept: str, referer: str):
+    req=Request(url,headers={
+      "User-Agent":UA_MOBILE,
+      "Accept":accept,
+      "Accept-Language":"zh-CN,zh;q=0.9,en;q=0.7",
+      "Referer":referer,
+    })
+    with urlopen(req,timeout=20) as r:
+        status=r.status; ctype=r.headers.get("Content-Type",""); body=r.read(20*1024*1024+1)
+    if len(body)>20*1024*1024: raise ValueError("size_limit")
+    if status!=200: raise HTTPError(url,status,"unexpected status",{},None)
+    return status,ctype,body
 
 
-def info_fields(obj):
-    data = obj.get("data") or {}
-    b = data.get("bookInfo") or data.get("bookinfo") or data
-    if not isinstance(b, dict):
-        return {}
-    labels = b.get("bookLabels") or []
-    tags = []
-    if isinstance(labels, list):
-        for x in labels:
-            if isinstance(x, dict) and x.get("tag"):
-                tags.append(str(x["tag"]))
+def page_is_challenge(body: bytes) -> bool:
+    text=BeautifulSoup(body,"html.parser").get_text(" ",strip=True).lower()
+    return any(x.lower() in text for x in CHALLENGE)
+
+
+def parse_mobile_book(body: bytes, wid: str, url: str):
+    soup=BeautifulSoup(body,"html.parser")
+    metas={}
+    for m in soup.find_all("meta"):
+        k=m.get("property") or m.get("name") or m.get("itemprop")
+        v=m.get("content")
+        if k and v: metas[str(k)]=str(v)
+    def mv(*keys):
+        for k in keys:
+            if metas.get(k): return metas[k]
+        return None
+    title=mv("og:novel:book_name","og:title")
+    author=mv("og:novel:author","author")
+    status=mv("og:novel:status")
+    update=mv("og:novel:update_time","article:modified_time")
+    latest=mv("og:novel:latest_chapter_name")
+    category=mv("og:novel:category")
+    desc=mv("og:description","description")
+    if not title:
+        h=soup.find("h1")
+        title=h.get_text(" ",strip=True) if h else None
     return {
-        "book_id": str(b.get("bookId") or b.get("bid") or ""),
-        "title": b.get("bookName") or b.get("bName"),
-        "author": b.get("authorName") or b.get("bAuth") or b.get("author"),
-        "status": b.get("bookStatus"),
-        "word_count": b.get("wordsCnt") or b.get("wordCount"),
-        "update_time": b.get("updTime") or b.get("updateTime"),
-        "latest_chapter": b.get("updChapterName") or b.get("lastChapterName"),
-        "category": b.get("chanName") or b.get("categoryName"),
-        "tags": tags,
-        "description": b.get("desc"),
-        "raw_keys": sorted(b.keys()),
+      "book_id":wid,"title":title,"author":author,"status":status,
+      "update_time":update,"latest_chapter":latest,"category":category,
+      "description":desc,"source_url":url,
+      "meta_fields":{k:v for k,v in metas.items() if any(t in k.lower() for t in ("novel","date","time","author","title"))},
+      "html_sha256":hashlib.sha256(body).hexdigest(),"html_bytes_transient":len(body),
+      "note":"HTML parsed transiently for metadata only; not retained."
     }
 
 
-def flatten_catalog(obj, book_id):
-    out = []
-    data = obj.get("data") if isinstance(obj, dict) else None
-
-    def walk(x, volume=None):
-        if isinstance(x, dict):
-            next_volume = volume
-            for k in ("vN", "volumeName", "volume_name", "volName"):
-                if x.get(k):
-                    next_volume = str(x[k])
-                    break
-            cid = x.get("cU") or x.get("chapterId") or x.get("chapter_id") or x.get("id")
-            title = x.get("cN") or x.get("chapterName") or x.get("chapter_name") or x.get("name")
-            if cid is not None and title and (
-                x.get("cU") is not None or
-                x.get("chapterId") is not None or
-                "chapter" in " ".join(str(k).lower() for k in x.keys())
-            ):
-                out.append({
-                    "book_id": str(book_id),
-                    "chapter_id": str(cid),
-                    "chapter_title": str(title),
-                    "volume": next_volume,
-                    "vip": x.get("isVip") if "isVip" in x else x.get("vipStatus"),
-                    "update_time": x.get("updateTime") or x.get("updTime"),
-                })
-            for v in x.values():
-                walk(v, next_volume)
-        elif isinstance(x, list):
-            for v in x:
-                walk(v, volume)
-
-    walk(data)
-    seen = set()
-    clean = []
-    for r in out:
-        key = (r["chapter_id"], r["chapter_title"])
-        if key in seen:
-            continue
+def parse_mobile_catalog(body: bytes, wid: str, base: str):
+    soup=BeautifulSoup(body,"html.parser"); out=[]; seen=set()
+    for a in soup.find_all("a",href=True):
+        href=urljoin(base,a["href"]); title=a.get_text(" ",strip=True)
+        if not title or wid not in href: continue
+        p=urlparse(href).path.lower()
+        if "/chapter/" not in p and "/read/" not in p: continue
+        nums=re.findall(r"\d+",p)
+        cid=nums[-1] if nums else href
+        key=(cid,title)
+        if key in seen: continue
         seen.add(key)
-        clean.append(r)
+        out.append({"book_id":wid,"chapter_id":cid,"chapter_title":title[:300],"url":href,"source":"mobile_catalog_html"})
+    return out
+
+
+def flatten_json_catalog(obj, wid: str, source: str):
+    out=[]
+    data=obj.get("data") if isinstance(obj,dict) else None
+    def walk(x,vol=None):
+        if isinstance(x,dict):
+            nvol=vol
+            for k in ("vN","volumeName","volume_name","volName"):
+                if x.get(k): nvol=str(x[k]); break
+            cid=x.get("cU") or x.get("chapterId") or x.get("chapter_id")
+            title=x.get("cN") or x.get("chapterName") or x.get("chapter_name")
+            if cid is not None and title:
+                out.append({
+                  "book_id":wid,"chapter_id":str(cid),"chapter_title":str(title),
+                  "volume":nvol,"vip":x.get("isVip") if "isVip" in x else x.get("vipStatus"),
+                  "update_time":x.get("updateTime") or x.get("updTime"),
+                  "publish_time":x.get("publishTime") or x.get("createTime"),
+                  "source":source,
+                })
+            for v in x.values(): walk(v,nvol)
+        elif isinstance(x,list):
+            for v in x: walk(v,vol)
+    walk(data)
+    seen=set(); clean=[]
+    for r in out:
+        key=(r["chapter_id"],r["chapter_title"])
+        if key in seen: continue
+        seen.add(key); clean.append(r)
     return clean
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--baseline", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--offset", type=int, default=0)
-    ap.add_argument("--limit", type=int, default=50)
-    ap.add_argument("--delay", type=float, default=3.0)
-    args = ap.parse_args()
+    ap=argparse.ArgumentParser()
+    ap.add_argument("--baseline",required=True); ap.add_argument("--out",required=True)
+    ap.add_argument("--offset",type=int,default=0); ap.add_argument("--limit",type=int,default=50)
+    ap.add_argument("--delay",type=float,default=3.0)
+    args=ap.parse_args()
 
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=False)
-    seeds = choose_ids(find_db(Path(args.baseline)), args.offset, args.limit)
-    (out/"seed_batch.json").write_text(json.dumps(seeds, ensure_ascii=False, indent=2), encoding="utf-8")
+    out=Path(args.out); out.mkdir(parents=True,exist_ok=False)
+    seeds=choose_ids(find_db(Path(args.baseline)),args.offset,args.limit)
+    (out/"seed_batch.json").write_text(json.dumps(seeds,ensure_ascii=False,indent=2),encoding="utf-8")
 
-    records = []
-    chapters = []
-    logs = []
-    blocked = False
-
+    records=[]; chapters=[]; logs=[]; blocked_hosts=set()
     for seed in seeds:
-        wid = seed["platform_work_id"]
-        rec = {"seed": seed, "work_id": wid, "observed_at": utcnow()}
-        for kind, base in (("info", INFO), ("catalog", CATALOG)):
-            url = base + "?" + urlencode({"bookId": wid})
-            log = {"work_id": wid, "kind": kind, "url": url, "started_at": utcnow()}
+        wid=seed["platform_work_id"]
+        rec={"seed":seed,"work_id":wid,"observed_at":utcnow(),"routes":[]}
+
+        book_url=f"https://m.qidian.com/book/{wid}/"
+        host=urlparse(book_url).hostname
+        if host not in blocked_hosts:
+            log={"work_id":wid,"kind":"mobile_work","url":book_url,"started_at":utcnow()}
             try:
-                status, ctype, raw, obj = get_json(url)
-                log.update(status=status, content_type=ctype, bytes=len(raw),
-                           sha256=hashlib.sha256(raw).hexdigest())
-                code = obj.get("code") if isinstance(obj, dict) else None
-                log["api_code"] = code
-                if kind == "info":
-                    rec["info"] = info_fields(obj)
-                    rec["info_api_code"] = code
-                    (out/f"info_{wid}.json").write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-                else:
-                    crows = flatten_catalog(obj, wid)
-                    rec["catalog_api_code"] = code
-                    rec["chapter_count"] = len(crows)
-                    rec["first_chapter"] = crows[0] if crows else None
-                    rec["last_chapter"] = crows[-1] if crows else None
-                    chapters.extend(crows)
-                    (out/f"catalog_{wid}.json").write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+                status,ctype,body=fetch(book_url,"text/html,application/xhtml+xml,*/*;q=0.8","https://m.qidian.com/")
+                challenged=page_is_challenge(body)
+                info=parse_mobile_book(body,wid,book_url)
+                log.update(status=status,content_type=ctype,bytes=len(body),sha256=hashlib.sha256(body).hexdigest(),challenged=challenged,parsed_title=bool(info.get("title")))
+                if challenged or status in BLOCK: blocked_hosts.add(host)
+                elif info.get("title"): rec["info"]=info
+                rec["routes"].append({"kind":"mobile_work","status":status,"challenged":challenged,"parsed_title":bool(info.get("title"))})
             except HTTPError as e:
-                log.update(status=e.code, error=repr(e))
-                if e.code in BLOCK:
-                    blocked = True
-            except (URLError, TimeoutError, json.JSONDecodeError, ValueError) as e:
-                log["error"] = repr(e)
-            logs.append(log)
-            (out/"retrieval_log.json").write_text(json.dumps(logs, ensure_ascii=False, indent=2), encoding="utf-8")
-            if blocked:
-                break
-            time.sleep(max(args.delay, 2.0))
-        records.append(rec)
-        with (out/"qidian_api_metadata.jsonl").open("w", encoding="utf-8") as f:
-            for x in records:
-                f.write(json.dumps(x, ensure_ascii=False) + "\n")
-        with (out/"qidian_chapter_catalog.jsonl").open("w", encoding="utf-8") as f:
-            for x in chapters:
-                f.write(json.dumps(x, ensure_ascii=False) + "\n")
-        if blocked:
-            break
+                log.update(status=e.code,error=repr(e))
+                if e.code in BLOCK: blocked_hosts.add(host)
+            except Exception as e: log["error"]=repr(e)
+            logs.append(log); time.sleep(max(2,args.delay))
 
-    summary = {
-        "requested_seed_count": len(seeds),
-        "completed_work_count": len(records),
-        "works_with_title": sum(bool((x.get("info") or {}).get("title")) for x in records),
-        "chapter_rows": len(chapters),
-        "blocked_stop": blocked,
-        "created_at": utcnow(),
-        "scope": "public bibliographic and chapter-catalog metadata only; no chapter content endpoint called",
+        catalog_candidates=[]
+        mobile_catalog=f"https://m.qidian.com/book/{wid}/catalog/"
+        mh=urlparse(mobile_catalog).hostname
+        if mh not in blocked_hosts:
+            log={"work_id":wid,"kind":"mobile_catalog","url":mobile_catalog,"started_at":utcnow()}
+            try:
+                status,ctype,body=fetch(mobile_catalog,"text/html,application/xhtml+xml,*/*;q=0.8",book_url)
+                challenged=page_is_challenge(body)
+                rows=parse_mobile_catalog(body,wid,mobile_catalog) if not challenged else []
+                log.update(status=status,content_type=ctype,bytes=len(body),sha256=hashlib.sha256(body).hexdigest(),challenged=challenged,chapter_rows=len(rows))
+                if challenged or status in BLOCK: blocked_hosts.add(mh)
+                catalog_candidates.append(("mobile_catalog_html",rows))
+                rec["routes"].append({"kind":"mobile_catalog","status":status,"challenged":challenged,"chapter_rows":len(rows)})
+            except HTTPError as e:
+                log.update(status=e.code,error=repr(e))
+                if e.code in BLOCK: blocked_hosts.add(mh)
+            except Exception as e: log["error"]=repr(e)
+            logs.append(log); time.sleep(max(2,args.delay))
+
+        for kind,url in (
+          ("read_ajax_catalog",f"https://read.qidian.com/ajax/book/category?bookId={wid}"),
+          ("book_ajax_catalog",f"https://book.qidian.com/ajax/book/category?bookId={wid}"),
+        ):
+            host=urlparse(url).hostname
+            if host in blocked_hosts: continue
+            log={"work_id":wid,"kind":kind,"url":url,"started_at":utcnow()}
+            try:
+                status,ctype,body=fetch(url,"application/json,text/javascript,*/*;q=0.1",book_url)
+                obj=json.loads(body.decode("utf-8","replace"))
+                rows=flatten_json_catalog(obj,wid,kind)
+                log.update(status=status,content_type=ctype,bytes=len(body),sha256=hashlib.sha256(body).hexdigest(),api_code=obj.get("code") if isinstance(obj,dict) else None,chapter_rows=len(rows))
+                catalog_candidates.append((kind,rows))
+                rec["routes"].append({"kind":kind,"status":status,"chapter_rows":len(rows),"api_code":obj.get("code") if isinstance(obj,dict) else None})
+            except HTTPError as e:
+                log.update(status=e.code,error=repr(e))
+                if e.code in BLOCK: blocked_hosts.add(host)
+            except Exception as e: log["error"]=repr(e)
+            logs.append(log); time.sleep(max(2,args.delay))
+
+        best=max(catalog_candidates,key=lambda x:len(x[1]),default=(None,[]))
+        rec["catalog_source"]=best[0]; rec["chapter_count"]=len(best[1])
+        rec["first_chapter"]=best[1][0] if best[1] else None
+        rec["last_chapter"]=best[1][-1] if best[1] else None
+        chapters.extend(best[1]); records.append(rec)
+
+        (out/"retrieval_log.json").write_text(json.dumps(logs,ensure_ascii=False,indent=2),encoding="utf-8")
+        with (out/"qidian_api_metadata.jsonl").open("w",encoding="utf-8") as f:
+            for x in records: f.write(json.dumps(x,ensure_ascii=False)+"\n")
+        with (out/"qidian_chapter_catalog.jsonl").open("w",encoding="utf-8") as f:
+            for x in chapters: f.write(json.dumps(x,ensure_ascii=False)+"\n")
+
+        if {"m.qidian.com","read.qidian.com","book.qidian.com"}.issubset(blocked_hosts): break
+
+    summary={
+      "requested_seed_count":len(seeds),"completed_work_count":len(records),
+      "works_with_title":sum(bool((x.get("info") or {}).get("title")) for x in records),
+      "works_with_catalog":sum((x.get("chapter_count") or 0)>0 for x in records),
+      "chapter_rows":len(chapters),"blocked_hosts":sorted(blocked_hosts),
+      "created_at":utcnow(),
+      "scope":"public bibliographic/chapter-catalog metadata only; no chapter content endpoint called",
     }
-    (out/"summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(summary, ensure_ascii=False))
+    (out/"summary.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+    print(json.dumps(summary,ensure_ascii=False))
 
 
-if __name__ == "__main__":
-    main()
+if __name__=="__main__": main()
