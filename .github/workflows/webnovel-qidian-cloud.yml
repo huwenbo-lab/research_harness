@@ -40,8 +40,8 @@ jobs:
         shell: bash
         run: |
           DAY_INDEX="$(( $(date -u +%s) / 86400 ))"
-          OFFSET="$(( DAY_INDEX * 50 ))"
-          LIMIT=50
+          OFFSET="$(( DAY_INDEX * 100 ))"
+          LIMIT=100
           DELAY=3
           if [ "${{ github.event_name }}" = "push" ]; then LIMIT=2; DELAY=2; fi
           echo "offset=$OFFSET" >> "$GITHUB_ENV"
