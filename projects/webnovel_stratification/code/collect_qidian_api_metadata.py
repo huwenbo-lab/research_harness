@@ -76,45 +76,81 @@ def parse_mobile_book(body: bytes, wid: str, url: str):
         k=m.get("property") or m.get("name") or m.get("itemprop")
         v=m.get("content")
         if k and v: metas[str(k)]=str(v)
+
+    structured={}
+    for node in soup.find_all("script",attrs={"type":"application/ld+json"}):
+        raw=node.string or node.get_text()
+        if not raw: continue
+        try: obj=json.loads(raw)
+        except Exception: continue
+        candidates=[]
+        if isinstance(obj,dict):
+            candidates.extend(obj.get("@graph") or [])
+            candidates.append(obj)
+        elif isinstance(obj,list): candidates.extend(obj)
+        for x in candidates:
+            if not isinstance(x,dict) or x.get("@type")!="Book": continue
+            ident=x.get("identifier")
+            ident_value=None
+            if isinstance(ident,dict): ident_value=str(ident.get("value") or "")
+            if ident_value and ident_value!=str(wid): continue
+            structured=x
+            break
+        if structured: break
+
     def mv(*keys):
         for k in keys:
             if metas.get(k): return metas[k]
         return None
-    title=mv("og:novel:book_name","og:title")
-    author=mv("og:novel:author","author")
+    author_obj=structured.get("author") if isinstance(structured,dict) else None
+    title=structured.get("name") if isinstance(structured,dict) else None
+    title=title or mv("og:novel:book_name","og:title")
+    author=(author_obj or {}).get("name") if isinstance(author_obj,dict) else None
+    author=author or mv("og:novel:author","author")
     status=mv("og:novel:status")
-    update=mv("og:novel:update_time","article:modified_time")
+    update=mv("og:novel:update_time","article:modified_time") or structured.get("dateModified")
+    published=structured.get("datePublished") if isinstance(structured,dict) else None
     latest=mv("og:novel:latest_chapter_name")
-    category=mv("og:novel:category")
-    desc=mv("og:description","description")
+    category=(structured.get("genre") if isinstance(structured,dict) else None) or mv("og:novel:category")
+    desc=(structured.get("description") if isinstance(structured,dict) else None) or mv("og:description","description")
     if not title:
-        h=soup.find("h1")
-        title=h.get_text(" ",strip=True) if h else None
+        h=soup.find("h1"); title=h.get_text(" ",strip=True) if h else None
     return {
       "book_id":wid,"title":title,"author":author,"status":status,
+      "date_published":published,"date_modified":structured.get("dateModified") if isinstance(structured,dict) else None,
       "update_time":update,"latest_chapter":latest,"category":category,
       "description":desc,"source_url":url,
+      "structured_data_basis":"schema.org Book JSON-LD" if structured else None,
       "meta_fields":{k:v for k,v in metas.items() if any(t in k.lower() for t in ("novel","date","time","author","title"))},
       "html_sha256":hashlib.sha256(body).hexdigest(),"html_bytes_transient":len(body),
       "note":"HTML parsed transiently for metadata only; not retained."
     }
 
-
 def parse_mobile_catalog(body: bytes, wid: str, base: str):
-    soup=BeautifulSoup(body,"html.parser"); out=[]; seen=set()
+    soup=BeautifulSoup(body,"html.parser"); raw=[]; pos=0
+    date_re=re.compile(r"(?:19|20)\\d{2}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}")
     for a in soup.find_all("a",href=True):
         href=urljoin(base,a["href"]); title=a.get_text(" ",strip=True)
         if not title or wid not in href: continue
         p=urlparse(href).path.lower()
         if "/chapter/" not in p and "/read/" not in p: continue
-        nums=re.findall(r"\d+",p)
-        cid=nums[-1] if nums else href
-        key=(cid,title)
-        if key in seen: continue
-        seen.add(key)
-        out.append({"book_id":wid,"chapter_id":cid,"chapter_title":title[:300],"url":href,"source":"mobile_catalog_html"})
-    return out
+        nums=re.findall(r"\\d+",p); cid=nums[-1] if nums else href
+        dm=date_re.search(title)
+        raw.append({
+          "book_id":wid,"chapter_id":cid,"chapter_title":title[:300],"url":href,
+          "display_time":dm.group(0) if dm else None,"source":"mobile_catalog_html","_pos":pos
+        }); pos+=1
 
+    # Mobile pages repeat the latest chapter above the actual catalog. Keep the
+    # last occurrence of each chapter ID, which removes that teaser while
+    # preserving catalog order.
+    last_index={}
+    for i,r in enumerate(raw): last_index[r["chapter_id"]]=i
+    out=[]
+    for i,r in enumerate(raw):
+        if last_index[r["chapter_id"]]!=i: continue
+        r.pop("_pos",None); out.append(r)
+    return out
 
 def flatten_json_catalog(obj, wid: str, source: str):
     out=[]
@@ -223,6 +259,9 @@ def main():
         rec["catalog_source"]=best[0]; rec["chapter_count"]=len(best[1])
         rec["first_chapter"]=best[1][0] if best[1] else None
         rec["last_chapter"]=best[1][-1] if best[1] else None
+        ending_re=re.compile(r"全文完|全书完|正文完|大结局|终章|完结章")
+        ending_rows=[x for x in best[1] if ending_re.search(x.get("chapter_title") or "")]
+        rec["ending_chapter_candidate"]=ending_rows[-1] if ending_rows else None
         chapters.extend(best[1]); records.append(rec)
 
         (out/"retrieval_log.json").write_text(json.dumps(logs,ensure_ascii=False,indent=2),encoding="utf-8")
