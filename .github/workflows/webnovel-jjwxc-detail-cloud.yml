@@ -41,13 +41,13 @@ jobs:
         shell: bash
         run: |
           DAY_INDEX="$(( $(date -u +%s) / 86400 ))"
-          OFFSET="$(( (DAY_INDEX * 50) % 27766 ))"
+          OFFSET="$(( DAY_INDEX * 100 ))"
           echo "offset=$OFFSET" >> "$GITHUB_ENV"
           python projects/webnovel_stratification/code/collect_jjwxc_public_metadata.py \
             --baseline baseline \
             --out jjwxc-detail-cloud \
             --offset "$OFFSET" \
-            --limit 50
+            --limit 100
 
       - name: Upload structured metadata only
         if: always()
