@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, HTTPCookieProcessor\nfrom http.cookiejar import CookieJar
 
 BASE="https://m.qidian.com/webcommon/category/list"
 UA="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
@@ -24,14 +24,29 @@ def utcnow():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def fetch_json(url, referer):
+def session():
+    jar=CookieJar(); opener=build_opener(HTTPCookieProcessor(jar))
+    prime="https://m.qidian.com/category/"
+    req=Request(prime,headers={
+      "User-Agent":UA,"Accept":"text/html,application/xhtml+xml,*/*;q=0.8",
+      "Accept-Language":"zh-CN,zh;q=0.9,en;q=0.7",
+    })
+    with opener.open(req,timeout=20) as r:
+        body=r.read(2*1024*1024)
+        if r.status!=200: raise HTTPError(prime,r.status,"prime failed",{},None)
+    token=next((x.value for x in jar if x.name=="_csrfToken"),"")
+    return opener,token
+
+
+def fetch_json(opener, url, referer):
     req=Request(url,headers={
       "User-Agent":UA,
       "Accept":"application/json,text/plain,*/*",
       "Accept-Language":"zh-CN,zh;q=0.9,en;q=0.7",
       "Referer":referer,
+      "X-Requested-With":"XMLHttpRequest",
     })
-    with urlopen(req,timeout=20) as r:
+    with opener.open(req,timeout=20) as r:
         status=r.status; ctype=r.headers.get("Content-Type",""); body=r.read(10*1024*1024+1)
     if len(body)>10*1024*1024: raise ValueError("size_limit")
     if status!=200: raise HTTPError(url,status,"unexpected status",{},None)
@@ -86,7 +101,7 @@ def main():
         referer="https://m.qidian.com/category/"
         log={"url":url,"gender":a.gender,"page":page,"started_at":utcnow()}
         try:
-            status,ctype,body,obj=fetch_json(url,referer)
+            if opener is None: raise ValueError("session_prime_failed")\n            status,ctype,body,obj=fetch_json(opener,url,referer)
             rows,meta=parse(obj,a.gender,page)
             log.update(status=status,content_type=ctype,bytes=len(body),sha256=hashlib.sha256(body).hexdigest(),api_code=meta.get("code"),records=len(rows))
             pages.append({"gender":a.gender,"page":page,**meta})
@@ -114,7 +129,7 @@ def main():
       "completed_pages":len(pages),"unique_works":len(records),
       "first_page_meta":pages[0] if pages else None,
       "last_page_meta":pages[-1] if pages else None,
-      "blocked_stop":blocked,"created_at":utcnow(),
+      "blocked_stop":blocked,"csrf_obtained":bool(csrf),"created_at":utcnow(),
       "scope":"official mobile category bibliographic metadata only",
     }
     (out/"summary.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
