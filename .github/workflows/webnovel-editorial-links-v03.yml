@@ -1,0 +1,59 @@
+name: Recover observed editorial issue links v03
+on:
+  push:
+    branches: [project/webnovel-stratification-pilot]
+    paths: [.github/workflows/webnovel-editorial-links-v03.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-v03-jjwxc
+          run-id: '35315139621'
+          github-token: ${{ github.token }}
+          path: prior
+      - run: python -m pip install 'beautifulsoup4>=4.12,<5'
+      - name: Follow actual previously retrieved issue hyperlinks
+        run: |
+          python - <<'PY'
+          import sys,json,time
+          from pathlib import Path
+          from urllib.parse import urljoin,urlparse,parse_qs
+          from bs4 import BeautifulSoup
+          sys.path.insert(0,'projects/webnovel_stratification/code')
+          from expand_sources_v03 import Fetcher
+          f=Fetcher(Path('editorial-links'))
+          links={}
+          for p in [Path('prior/jjwxc_rank_01.html'),Path('prior/jjwxc_rank_02.html')]:
+              soup=BeautifulSoup(p.read_bytes(),'html.parser')
+              for a in soup.find_all('a',href=True):
+                  url=urljoin('https://www.jjwxc.net/',a['href']);q=parse_qs(urlparse(url).query)
+                  if urlparse(url).netloc=='www.jjwxc.net' and q.get('timeid',[''])[0].isdigit() and q.get('orderstr',[''])[0] in ('1','2'):
+                      links[url]={'url':url,'issue_id':q['timeid'][0],'orderstr':q['orderstr'][0],'label':a.get_text(' ',strip=True),'discovered_in':p.name}
+          results=[]
+          for i,item in enumerate(sorted(links.values(),key=lambda x:(x['orderstr'],int(x['issue_id']))))):
+              if i>=60 or 'www.jjwxc.net' in f.blocked:break
+              name='jj_editorial_o'+item['orderstr']+'_issue'+item['issue_id']+'.html'
+              b=f.get(item['url'],name,robots=True,delay=4)
+              if b is None and 'www.jjwxc.net' not in f.blocked and ('timed out' in f.logs[-1].get('error','') or 'IncompleteRead' in f.logs[-1].get('error','')):
+                  time.sleep(8);b=f.get(item['url'],name,robots=True,delay=4)
+              results.append(dict(**item,file=name,acquired=b is not None,retrieved_at=f.logs[-1]['retrieved_at']))
+              (f.out/'editorial_issues.json').write_text(json.dumps(results,ensure_ascii=False,indent=2),encoding='utf-8')
+          print('discovered',len(links),'acquired',sum(x['acquired'] for x in results))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: webnovel-v03-editorial-links
+          path: editorial-links/
+          retention-days: 30
+          if-no-files-found: error
