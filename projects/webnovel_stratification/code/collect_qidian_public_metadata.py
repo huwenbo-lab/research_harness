@@ -217,7 +217,7 @@ async def collect(args):
                     item["pages"].append({"work_id": wid, "page_kind": kind, "url": url, "observed_at": utcnow(), "error": "timeout"})
                 except Exception as e:
                     item["pages"].append({"work_id": wid, "page_kind": kind, "url": url, "observed_at": utcnow(), "error": repr(e)})
-                log.append({"work_id": wid, "kind": kind, "requested_url": url, "started_at": started, "status": status, "blocked": blocked})
+                is_blocked = host in blocked_hosts\n                log.append({"work_id": wid, "kind": kind, "requested_url": url, "started_at": started, "status": status, "blocked": is_blocked})
                 (out / "retrieval_log.json").write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
                 await page.wait_for_timeout(args.delay_ms)
                 if blocked:
@@ -234,7 +234,7 @@ async def collect(args):
     summary = {
         "requested_seed_count": len(seeds),
         "completed_work_count": len(records),
-        "blocked_stop": bool(log and log[-1]["blocked"]),
+        "blocked_hosts": sorted(blocked_hosts),\n        "blocked_stop": len(blocked_hosts) >= 2,
         "created_at": utcnow(),
         "scope": "public bibliographic/catalog/date metadata only; no novel prose retained",
     }
