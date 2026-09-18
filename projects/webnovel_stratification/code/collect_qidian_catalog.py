@@ -96,8 +96,14 @@ def main():
 
     out=Path(a.out); out.mkdir(parents=True,exist_ok=False)
     records=[]; logs=[]; pages=[]; seen=set(); blocked=False
+    try:
+        opener,csrf=session()
+    except Exception as e:
+        opener=None; csrf=""
+        logs.append({"kind":"session_prime","error":repr(e),"started_at":utcnow()})
     for page in range(a.start_page,a.start_page+a.pages):
         params={"catId":"-1","pageNum":str(page),"gender":a.gender}
+        if csrf: params["_csrfToken"]=csrf
         url=BASE+"?"+urlencode(params)
         referer="https://m.qidian.com/category/"
         log={"url":url,"gender":a.gender,"page":page,"started_at":utcnow()}
