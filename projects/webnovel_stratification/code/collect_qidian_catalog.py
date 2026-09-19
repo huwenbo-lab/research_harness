@@ -125,6 +125,8 @@ def main():
     ap.add_argument("--pages", type=int, default=2)
     ap.add_argument("--cat-ids", default="")
     ap.add_argument("--delay", type=float, default=3.0)
+    ap.add_argument("--size", choices=["", "1", "2", "3", "4", "5"], default="")
+    ap.add_argument("--isfinish", choices=["", "1", "2"], default="")
     args = ap.parse_args()
 
     if args.start_page < 1 or not 1 <= args.pages <= 200:
@@ -177,6 +179,10 @@ def main():
             break
         for page in range(args.start_page, args.start_page + args.pages):
             params = {"catId": cat_id, "pageNum": str(page), "gender": args.gender}
+            if args.size:
+                params["size"] = args.size
+            if args.isfinish:
+                params["isfinish"] = args.isfinish
             if csrf:
                 params["_csrfToken"] = csrf
             url = BASE + "?" + urlencode(params)
@@ -187,6 +193,8 @@ def main():
                 "gender": args.gender,
                 "cat_id": cat_id,
                 "page": page,
+                "size": args.size or None,
+                "isfinish": args.isfinish or None,
                 "started_at": utcnow(),
             }
             try:
@@ -239,6 +247,8 @@ def main():
         "gender": args.gender,
         "category_ids": cat_ids,
         "start_page": args.start_page,
+        "size": args.size or None,
+        "isfinish": args.isfinish or None,
         "requested_pages_per_category": args.pages,
         "completed_page_requests": len(page_meta),
         "unique_works": len(records),
