@@ -59,6 +59,33 @@ def choose_ids(db: Path, offset: int, limit: int) -> list[dict]:
     return [dict(rows[(start + i) % n]) for i in range(min(limit, n))]
 
 
+def choose_seed_file(path: Path, offset: int, limit: int) -> list[dict]:
+    rows = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        wid = str(r.get("platform_work_id") or r.get("work_id") or "").strip()
+        if not wid.isdigit():
+            continue
+        if "jjwxc" == "jjwxc":
+            genre = r.get("genre_raw") or r.get("genre")
+            if genre is not None and "-" not in str(genre):
+                continue
+        rows[wid] = {
+            "platform_work_id": wid,
+            "title": r.get("title"),
+            "author": r.get("author"),
+            "status_raw": r.get("status_raw") or r.get("status"),
+            "work_url": r.get("work_url"),
+        }
+    ordered = [rows[k] for k in sorted(rows, key=lambda x: int(x))]
+    if not ordered:
+        return []
+    start = offset % len(ordered)
+    return [ordered[(start + i) % len(ordered)] for i in range(min(limit, len(ordered)))]
+
+
 def robots_allowed() -> tuple[bool, float]:
     url = "https://www.jjwxc.net/robots.txt"
     with urlopen(Request(url, headers={"User-Agent": UA}), timeout=20) as r:
@@ -134,7 +161,8 @@ def compact(parsed: dict, html_hash: str, html_bytes: int, seed: dict, url: str)
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--baseline", required=True)
+    ap.add_argument("--baseline")
+    ap.add_argument("--seed-file")
     ap.add_argument("--out", required=True)
     ap.add_argument("--offset", type=int, default=0)
     ap.add_argument("--limit", type=int, default=50)
@@ -142,7 +170,7 @@ def main():
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=False)
-    seeds = choose_ids(find_db(Path(args.baseline)), args.offset, args.limit)
+    if args.seed_file:\n        seeds = choose_seed_file(Path(args.seed_file), args.offset, args.limit)\n    elif args.baseline:\n        seeds = choose_ids(find_db(Path(args.baseline)), args.offset, args.limit)\n    else:\n        ap.error("one of --seed-file or --baseline is required")
     (out / "seed_batch.json").write_text(json.dumps(seeds, ensure_ascii=False, indent=2), encoding="utf-8")
 
     allowed, delay = robots_allowed()
