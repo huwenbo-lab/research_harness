@@ -55,9 +55,10 @@ jobs:
           shard=${{ matrix.shard }}
           day=int(time.time()//86400)
           cats=['21','22','4','15','5','7','9','10','12']
-          task=(day*3+shard)%(len(cats)*5*2*5)
-          block=task%5
-          cell=task//5
+          total_cells=len(cats)*5*2
+          task=(day*3+shard)%(total_cells*5)
+          cell=task%total_cells
+          block=(task//total_cells)%5
           cat=cats[cell//10]
           rem=cell%10
           print('cat_id='+cat)
