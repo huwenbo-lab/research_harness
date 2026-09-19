@@ -1,0 +1,57 @@
+name: Seed master integration probe
+
+on:
+  push:
+    branches: [project/webnovel-stratification-pilot]
+    paths: [.github/workflows/webnovel-seed-master-probe.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: project/webnovel-stratification-pilot
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-structured-database-v04
+          run-id: '35320781239'
+          github-token: ${{ github.token }}
+          path: baseline
+      - uses: actions/download-artifact@v4
+        with:
+          name: qidian-catalog-probe-male-35429536337
+          run-id: '35429536337'
+          github-token: ${{ github.token }}
+          path: harvest/qidian
+      - name: Build and validate dynamic seed masters
+        run: |
+          python -m py_compile projects/webnovel_stratification/code/build_seed_master.py
+          python -m py_compile projects/webnovel_stratification/code/collect_qidian_api_metadata.py
+          python -m py_compile projects/webnovel_stratification/code/collect_jjwxc_public_metadata.py
+          python projects/webnovel_stratification/code/build_seed_master.py \
+            --baseline baseline --harvest-root harvest --out seed-master
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          q=Path('seed-master/qidian-seeds.jsonl').read_text().splitlines()
+          j=Path('seed-master/jjwxc-seeds.jsonl').read_text().splitlines()
+          assert len(q) >= 3345, len(q)
+          assert len(j) > 1000, len(j)
+          assert all(json.loads(x)['platform']=='qidian' for x in q[:10])
+          assert all(json.loads(x)['platform']=='jjwxc' for x in j[:10])
+          print('validated',len(q),len(j))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seed-master-probe-${{ github.run_id }}
+          path: seed-master/
+          retention-days: 30
+          if-no-files-found: error
