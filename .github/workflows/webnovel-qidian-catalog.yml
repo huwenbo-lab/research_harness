@@ -26,7 +26,8 @@ jobs:
           python projects/webnovel_stratification/code/collect_qidian_catalog.py \
             --out qidian-catalog-male \
             --gender male \
-            --cat-ids 21,22 \
+            --cat-ids 21 \
+            --size 4 --isfinish 1 \
             --start-page 1 --pages 2 --delay 2
       - uses: actions/upload-artifact@v4
         if: always()
