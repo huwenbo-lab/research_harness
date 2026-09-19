@@ -1,0 +1,60 @@
+name: Rebuild webnovel database
+on:
+  push:
+    branches: [project/webnovel-stratification-pilot]
+    paths: [.github/workflows/webnovel-build-database.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download pilot source batch
+        uses: actions/download-artifact@v4
+        with:
+          name: webnovel-source-pilot
+          run-id: 35289171337
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: projects/webnovel_stratification/data/raw/pilot
+      - name: Download annual catalog batch
+        uses: actions/download-artifact@v4
+        with:
+          name: jjwxc-annual-catalog
+          run-id: 35289630732
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: projects/webnovel_stratification/data/raw/annual
+      - name: Download historical metadata batch
+        uses: actions/download-artifact@v4
+        with:
+          name: webnovel-metadata-sources
+          run-id: 35289714485
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: projects/webnovel_stratification/data/raw/metadata
+      - name: Install parser
+        run: python -m pip install 'beautifulsoup4>=4.12,<5'
+      - name: Build SQLite and CSV tables
+        working-directory: projects/webnovel_stratification
+        run: python code/build_database.py --root .
+      - name: Test identities, dates, provenance and database integrity
+        working-directory: projects/webnovel_stratification
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m unittest discover -s tests -v 2>&1 | tee reports/tests.log
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: webnovel-structured-database-v02
+          path: |
+            projects/webnovel_stratification/code/
+            projects/webnovel_stratification/tests/
+            projects/webnovel_stratification/reports/
+            projects/webnovel_stratification/data/derived/
+          retention-days: 30
+          if-no-files-found: error

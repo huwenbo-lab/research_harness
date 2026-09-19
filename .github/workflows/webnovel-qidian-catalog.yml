@@ -1,0 +1,38 @@
+name: Qidian catalog discovery probe
+
+on:
+  push:
+    branches: [project/webnovel-stratification-pilot]
+    paths:
+      - .github/workflows/webnovel-qidian-catalog.yml
+      - projects/webnovel_stratification/code/collect_qidian_catalog.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: project/webnovel-stratification-pilot
+          persist-credentials: false
+      - name: Validate and probe two male categories
+        run: |
+          python -m py_compile projects/webnovel_stratification/code/collect_qidian_catalog.py
+          python projects/webnovel_stratification/code/collect_qidian_catalog.py \
+            --out qidian-catalog-male \
+            --gender male \
+            --cat-ids 21 \
+            --size 4 --isfinish 1 \
+            --start-page 1 --pages 2 --delay 2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qidian-catalog-probe-male-${{ github.run_id }}
+          path: qidian-catalog-male/
+          retention-days: 90
+          if-no-files-found: error

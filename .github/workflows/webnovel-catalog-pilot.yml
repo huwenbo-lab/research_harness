@@ -1,0 +1,60 @@
+name: Webnovel catalog source pilot
+on:
+  push:
+    branches: [project/webnovel-stratification-pilot]
+    paths: [.github/workflows/webnovel-catalog-pilot.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Retrieve public metadata and test catalog access
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, time, hashlib, urllib.request, urllib.error, urllib.robotparser
+          from pathlib import Path
+          out = Path('webnovel-source-pilot'); out.mkdir()
+          logs = []
+          def fetch(url, name):
+              rec = {'url':url, 'file':name, 'retrieved_at_utc':time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
+              try:
+                  req = urllib.request.Request(url, headers={'User-Agent':'WebnovelBibliographyResearch/0.1 (+https://github.com/huwenbo-lab/research_harness)'})
+                  with urllib.request.urlopen(req, timeout=20) as r:
+                      data = r.read(20*1024*1024+1)
+                      if len(data)>20*1024*1024: raise ValueError('response_size_limit')
+                      rec.update(status=r.status, content_type=r.headers.get('Content-Type'), bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+                      (out/name).write_bytes(data)
+                  print(json.dumps(rec, ensure_ascii=False), flush=True)
+                  return data
+              except Exception as e:
+                  rec.update(status='error', error=str(e)); print(json.dumps(rec), flush=True)
+                  return None
+              finally:
+                  logs.append(rec); (out/'retrieval_log.json').write_text(json.dumps(logs, ensure_ascii=False, indent=2),encoding='utf-8'); time.sleep(2)
+          fetch('https://raw.githubusercontent.com/GOLEM-lab/Qidian_Webnovel_DataCollection/main/data/bookList.csv','golem_bookList.csv')
+          root='https://raw.githubusercontent.com/WATHSI-S/qidian-heat-analysis/d30ca1d93070f9f064c66547ee6056c53589d5de/'
+          for week in range(20,39):
+              fetch(root+f'data/2026-W{week:02}.json',f'qidian_2026_W{week:02}.json')
+          for owner,repo,branch in [('positivepeng','NovelSpider','master'),('yokowh','novelDataAnalysis','master'),('wanfb','Text-Mining-of-Qidian-Website','master')]:
+              fetch(f'https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1',f'{owner}_tree.json')
+          for host,path,name in [('www.jjwxc.net','/bookbase.php?orderstr=1','jjwxc_catalog.html'),('www.qidian.com','/all/','qidian_catalog.html')]:
+              robot=fetch('https://'+host+'/robots.txt',name+'.robots.txt')
+              if robot is None:
+                  print('Skipped catalog: robots unavailable',host); continue
+              rp=urllib.robotparser.RobotFileParser(); rp.parse(robot.decode('utf-8','replace').splitlines())
+              if rp.can_fetch('WebnovelBibliographyResearch','https://'+host+path):
+                  fetch('https://'+host+path,name)
+              else:
+                  print('Skipped catalog: robots disallow',host)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: webnovel-source-pilot
+          path: webnovel-source-pilot/
+          retention-days: 14
+          if-no-files-found: error
