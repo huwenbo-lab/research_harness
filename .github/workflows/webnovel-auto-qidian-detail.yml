@@ -1,6 +1,9 @@
 name: Auto enrich Qidian work dates
 
 on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/webnovel-auto-qidian-detail.yml]
   schedule:
     - cron: '15 4 * * *'
   workflow_dispatch:
