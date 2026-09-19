@@ -1,0 +1,70 @@
+name: Auto enrich JJWXC work dates
+
+on:
+  schedule:
+    - cron: '15 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: project/webnovel-stratification-pilot
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-structured-database-v04
+          run-id: '35320781239'
+          github-token: ${{ github.token }}
+          path: baseline
+
+      - name: Select deterministic ID block
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import time, math
+          n=27766; batch=50
+          day=int(time.time()//86400)
+          block=day%math.ceil(n/batch)
+          print('offset='+str(block*batch))
+          print('block_id='+str(block))
+          PY
+
+      - name: Enrich public work-page chapter dates
+        run: |
+          python -m pip install 'beautifulsoup4>=4.12,<5'
+          python -m py_compile projects/webnovel_stratification/code/date_parser_v04.py
+          python -m py_compile projects/webnovel_stratification/code/collect_jjwxc_public_metadata.py
+          python projects/webnovel_stratification/code/collect_jjwxc_public_metadata.py \
+            --baseline baseline \
+            --out jjwxc-detail-auto \
+            --offset "$offset" \
+            --limit 50
+
+      - name: Pack and persist
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          stamp=$(date -u +%Y%m%d)
+          asset="jjwxc-detail-${stamp}-block${block_id}.tar.gz"
+          tar -czf "$asset" jjwxc-detail-auto
+          gh release view webnovel-harvest >/dev/null 2>&1 || \
+            gh release create webnovel-harvest --title 'Webnovel harvest batches' --notes 'Automated public metadata batches; no novel prose.' || true
+          gh release upload webnovel-harvest "$asset" --clobber
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jjwxc-detail-${{ github.run_id }}
+          path: jjwxc-detail-auto/
+          retention-days: 90
+          if-no-files-found: error
