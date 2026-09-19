@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 concurrency:
@@ -17,16 +17,97 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  jjwxc-catalog:
+  ensure-release:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="webnovel-harvest-$(date -u +%Y%m)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target main \
+              --title "Webnovel harvest $(date -u +%Y-%m)" \
+              --notes "Automated public bibliographic and date metadata batches. Novel prose is not retained."
+
+  qidian-catalog:
+    needs: ensure-release
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        shard: [0, 1, 2]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: project/webnovel-stratification-pilot
+          persist-credentials: false
+      - name: Select deterministic Qidian partition
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import time
+          shard=${{ matrix.shard }}
+          day=int(time.time()//86400)
+          cats=['21','22','4','15','5','7','9','10','12']
+          task=(day*3+shard)%(len(cats)*5*2*5)
+          block=task%5
+          cell=task//5
+          cat=cats[cell//10]
+          rem=cell%10
+          print('cat_id='+cat)
+          print('size_id='+str(rem//2+1))
+          print('status_id='+str(rem%2+1))
+          print('start_page='+str(block*100+1))
+          print('task_id='+str(task))
+          PY
+      - name: Harvest official Qidian mobile category API
+        run: |
+          python -m py_compile projects/webnovel_stratification/code/collect_qidian_catalog.py
+          python projects/webnovel_stratification/code/collect_qidian_catalog.py \
+            --out qidian-catalog \
+            --gender male \
+            --cat-ids "$cat_id" \
+            --size "$size_id" \
+            --isfinish "$status_id" \
+            --start-page "$start_page" \
+            --pages 100 \
+            --delay 3
+      - name: Persist Qidian catalog batch
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.ensure-release.outputs.tag }}
+        run: |
+          stamp=$(date -u +%Y%m%d)
+          asset="qidian-catalog-${stamp}-task${task_id}.tar.gz"
+          tar -czf "$asset" qidian-catalog
+          gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qidian-catalog-${{ github.run_id }}-${{ matrix.shard }}
+          path: qidian-catalog/
+          retention-days: 90
+          if-no-files-found: error
+
+  jjwxc-catalog:
+    needs: [ensure-release, qidian-catalog]
+    if: always() && needs.ensure-release.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
           ref: project/webnovel-stratification-pilot
           persist-credentials: false
       - run: python -m pip install 'beautifulsoup4>=4.12,<5'
-      - name: Harvest one bounded JJWXC catalog batch
+      - name: Harvest one public JJWXC annual catalog page
         shell: bash
         run: |
           RUN_DAY="$(date -u +%Y%m%d)"
@@ -34,9 +115,19 @@ jobs:
           YEAR="$(( 2005 + (DAY_INDEX % 21) ))"
           echo "year=$YEAR" >> "$GITHUB_ENV"
           python projects/webnovel_stratification/code/collect_catalog.py \
-            --out "jjwxc-catalog" \
+            --out jjwxc-catalog \
             --start "$YEAR" --end "$YEAR" \
-            --pages-per-year 5 --seed "$RUN_DAY" --delay 5
+            --pages-per-year 1 --seed "$RUN_DAY" --delay 5
+      - name: Persist JJWXC catalog batch
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.ensure-release.outputs.tag }}
+        run: |
+          stamp=$(date -u +%Y%m%d)
+          asset="jjwxc-catalog-${stamp}-${year}.tar.gz"
+          tar -czf "$asset" jjwxc-catalog
+          gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -46,8 +137,8 @@ jobs:
           if-no-files-found: error
 
   jjwxc-detail:
-    needs: jjwxc-catalog
-    if: always()
+    needs: [ensure-release, jjwxc-catalog]
+    if: always() && needs.ensure-release.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -62,27 +153,41 @@ jobs:
           github-token: ${{ github.token }}
           path: baseline
       - run: python -m pip install 'beautifulsoup4>=4.12,<5'
-      - name: Harvest JJWXC public work/chapter metadata
+      - name: Harvest JJWXC public work and chapter-date metadata
         shell: bash
         run: |
-          DAY_INDEX="$(( $(date -u +%s) / 86400 ))"
-          OFFSET="$(( DAY_INDEX * 100 ))"
-          echo "offset=$OFFSET" >> "$GITHUB_ENV"
+          python - <<'PY' >> "$GITHUB_ENV"
+          import time, math
+          n=27766; batch=100
+          block=int(time.time()//86400)%math.ceil(n/batch)
+          print('offset='+str(block*batch))
+          print('block_id='+str(block))
+          PY
           python projects/webnovel_stratification/code/collect_jjwxc_public_metadata.py \
-            --baseline baseline --out jjwxc-detail --offset "$OFFSET" --limit 100
+            --baseline baseline --out jjwxc-detail --offset "$offset" --limit 100
+      - name: Persist JJWXC detail batch
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.ensure-release.outputs.tag }}
+        run: |
+          stamp=$(date -u +%Y%m%d)
+          asset="jjwxc-detail-${stamp}-block${block_id}.tar.gz"
+          tar -czf "$asset" jjwxc-detail
+          gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: jjwxc-detail-${{ github.run_id }}-${{ env.offset }}
+          name: jjwxc-detail-${{ github.run_id }}-${{ env.block_id }}
           path: jjwxc-detail/
           retention-days: 90
           if-no-files-found: error
 
   qidian-metadata:
-    needs: jjwxc-detail
-    if: always()
+    needs: [ensure-release, jjwxc-detail]
+    if: always() && needs.ensure-release.result == 'success'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
@@ -94,20 +199,34 @@ jobs:
           run-id: '35320781239'
           github-token: ${{ github.token }}
           path: baseline
-      - name: Harvest Qidian public metadata
+      - name: Harvest Qidian public work and chapter-catalog metadata
         shell: bash
         run: |
           python -m pip install 'beautifulsoup4>=4.12,<5'
+          python - <<'PY' >> "$GITHUB_ENV"
+          import time, math
+          n=3345; batch=50
+          block=int(time.time()//86400)%math.ceil(n/batch)
+          print('offset='+str(block*batch))
+          print('block_id='+str(block))
+          PY
           python -m py_compile projects/webnovel_stratification/code/collect_qidian_api_metadata.py
-          DAY_INDEX="$(( $(date -u +%s) / 86400 ))"
-          OFFSET="$(( DAY_INDEX * 100 ))"
-          echo "offset=$OFFSET" >> "$GITHUB_ENV"
           python projects/webnovel_stratification/code/collect_qidian_api_metadata.py \
-            --baseline baseline --out qidian-metadata --offset "$OFFSET" --limit 100 --delay 3
+            --baseline baseline --out qidian-metadata --offset "$offset" --limit 50 --delay 4
+      - name: Persist Qidian detail batch
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.ensure-release.outputs.tag }}
+        run: |
+          stamp=$(date -u +%Y%m%d)
+          asset="qidian-detail-${stamp}-block${block_id}.tar.gz"
+          tar -czf "$asset" qidian-metadata
+          gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: qidian-metadata-${{ github.run_id }}-${{ env.offset }}
+          name: qidian-metadata-${{ github.run_id }}-${{ env.block_id }}
           path: qidian-metadata/
           retention-days: 90
           if-no-files-found: error
