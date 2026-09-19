@@ -97,6 +97,61 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
+
+  jjwxc-partition:
+    needs: [ensure-release, qidian-catalog]
+    if: always() && needs.ensure-release.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: project/webnovel-stratification-pilot
+          persist-credentials: false
+      - run: python -m pip install 'beautifulsoup4>=4.12,<5'
+      - name: Select deterministic public JJWXC partition
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import time
+          day=int(time.time()//86400)
+          years=list(range(2005,2026))
+          ycs=[1,2]
+          xxs=[1,2,3,5,6]
+          finishes=[1,2]
+          cells=[(y,yc,xx,f) for y in years for yc in ycs for xx in xxs for f in finishes]
+          y,yc,xx,finish=cells[day%len(cells)]
+          print('part_year='+str(y))
+          print('part_yc='+str(yc))
+          print('part_xx='+str(xx))
+          print('part_finish='+str(finish))
+          print('part_id='+str(day%len(cells)))
+          PY
+      - name: Harvest one recursively partitioned public catalog cell
+        run: |
+          python -m py_compile projects/webnovel_stratification/code/collect_jjwxc_partitioned_catalog.py
+          python projects/webnovel_stratification/code/collect_jjwxc_partitioned_catalog.py \
+            --out jjwxc-partition \
+            --year "$part_year" --yc "$part_yc" --xx "$part_xx" --isfinish "$part_finish" \
+            --max-pages 10 --request-budget 80 --delay 3
+      - name: Persist JJWXC partition batch
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.ensure-release.outputs.tag }}
+        run: |
+          stamp=$(date -u +%Y%m%d)
+          asset="jjwxc-partition-${stamp}-cell${part_id}.tar.gz"
+          tar -czf "$asset" jjwxc-partition
+          gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jjwxc-partition-${{ github.run_id }}-${{ env.part_id }}
+          path: jjwxc-partition/
+          retention-days: 90
+          if-no-files-found: error
+
   jjwxc-catalog:
     needs: [ensure-release, qidian-catalog]
     if: always() && needs.ensure-release.result == 'success'
@@ -139,7 +194,7 @@ jobs:
 
 
   refresh-seed-master:
-    needs: [ensure-release, qidian-catalog, jjwxc-catalog]
+    needs: [ensure-release, qidian-catalog, jjwxc-partition, jjwxc-catalog]
     if: always() && needs.ensure-release.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -165,6 +220,10 @@ jobs:
         with:
           pattern: jjwxc-catalog-${{ github.run_id }}-*
           path: harvest/jjwxc
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: jjwxc-partition-${{ github.run_id }}-*
+          path: harvest/jjwxc-partition
       - name: Download previous seed master when present
         env:
           GH_TOKEN: ${{ github.token }}
