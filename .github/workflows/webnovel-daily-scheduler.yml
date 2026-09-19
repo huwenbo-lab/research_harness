@@ -358,3 +358,68 @@ jobs:
           path: qidian-metadata/
           retention-days: 90
           if-no-files-found: error
+
+  update-live-database:
+    needs: [ensure-release, refresh-seed-master, qidian-metadata]
+    if: always() && needs.refresh-seed-master.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: project/webnovel-stratification-pilot
+          persist-credentials: false
+      - name: Download current persistent seed masters and prior live database
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p seeds previous harvest-archives harvest
+          gh release download webnovel-master --repo "$GITHUB_REPOSITORY" \
+            --pattern 'qidian-seeds.jsonl' --pattern 'jjwxc-seeds.jsonl' \
+            --dir seeds --clobber
+          gh release download webnovel-live --repo "$GITHUB_REPOSITORY" \
+            --pattern 'webnovel-latest.sqlite' --dir previous --clobber || true
+      - name: Download all durable metadata batches from the current month
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.ensure-release.outputs.tag }}
+        run: |
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.tar.gz' --dir harvest-archives --clobber || true
+          i=0
+          shopt -s nullglob
+          for file in harvest-archives/*.tar.gz; do
+            i=$((i+1))
+            mkdir -p "harvest/batch-$i"
+            tar -xzf "$file" -C "harvest/batch-$i"
+          done
+      - name: Incrementally build ready-to-use metadata database
+        run: |
+          python -m py_compile projects/webnovel_stratification/code/update_live_database.py
+          EXISTING=""
+          if [ -f previous/webnovel-latest.sqlite ]; then
+            EXISTING="--existing-db previous/webnovel-latest.sqlite"
+          fi
+          python projects/webnovel_stratification/code/update_live_database.py \
+            $EXISTING --seed-dir seeds --harvest-root harvest --out live-db
+      - name: Persist current ready-to-use database
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view webnovel-live --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create webnovel-live --repo "$GITHUB_REPOSITORY" --target main \
+              --title 'Current webnovel metadata database' \
+              --notes 'Continuously updated metadata-only research database. No novel prose is stored.'
+          gh release upload webnovel-live \
+            live-db/webnovel-latest.sqlite \
+            live-db/works_latest.csv \
+            live-db/work_dates_latest.csv \
+            live-db/live_database_summary.json \
+            --repo "$GITHUB_REPOSITORY" --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webnovel-live-database-${{ github.run_id }}
+          path: live-db/
+          retention-days: 90
+          if-no-files-found: error
+
