@@ -1,6 +1,9 @@
 name: Auto enrich JJWXC work dates
 
 on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/webnovel-auto-jjwxc-detail.yml]
   schedule:
     - cron: '15 7 * * *'
   workflow_dispatch:
