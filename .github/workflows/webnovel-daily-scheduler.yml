@@ -156,15 +156,17 @@ jobs:
       - name: Harvest JJWXC public work and chapter-date metadata
         shell: bash
         run: |
-          python - <<'PY' >> "$GITHUB_ENV"
+          BLOCK=$(python - <<'PY'
           import time, math
           n=27766; batch=100
-          block=int(time.time()//86400)%math.ceil(n/batch)
-          print('offset='+str(block*batch))
-          print('block_id='+str(block))
+          print(int(time.time()//86400)%math.ceil(n/batch))
           PY
+          )
+          OFFSET=$((BLOCK*100))
+          echo "offset=$OFFSET" >> "$GITHUB_ENV"
+          echo "block_id=$BLOCK" >> "$GITHUB_ENV"
           python projects/webnovel_stratification/code/collect_jjwxc_public_metadata.py \
-            --baseline baseline --out jjwxc-detail --offset "$offset" --limit 100
+            --baseline baseline --out jjwxc-detail --offset "$OFFSET" --limit 100
       - name: Persist JJWXC detail batch
         if: always()
         env:
@@ -203,16 +205,18 @@ jobs:
         shell: bash
         run: |
           python -m pip install 'beautifulsoup4>=4.12,<5'
-          python - <<'PY' >> "$GITHUB_ENV"
+          BLOCK=$(python - <<'PY'
           import time, math
           n=3345; batch=50
-          block=int(time.time()//86400)%math.ceil(n/batch)
-          print('offset='+str(block*batch))
-          print('block_id='+str(block))
+          print(int(time.time()//86400)%math.ceil(n/batch))
           PY
+          )
+          OFFSET=$((BLOCK*50))
+          echo "offset=$OFFSET" >> "$GITHUB_ENV"
+          echo "block_id=$BLOCK" >> "$GITHUB_ENV"
           python -m py_compile projects/webnovel_stratification/code/collect_qidian_api_metadata.py
           python projects/webnovel_stratification/code/collect_qidian_api_metadata.py \
-            --baseline baseline --out qidian-metadata --offset "$offset" --limit 50 --delay 4
+            --baseline baseline --out qidian-metadata --offset "$OFFSET" --limit 50 --delay 4
       - name: Persist Qidian detail batch
         if: always()
         env:
