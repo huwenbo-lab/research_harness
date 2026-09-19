@@ -240,13 +240,18 @@ def flatten_json_catalog(obj, wid: str, source: str):
 
 def main():
     ap=argparse.ArgumentParser()
-    ap.add_argument("--baseline",required=True); ap.add_argument("--out",required=True)
+    ap.add_argument("--baseline"); ap.add_argument("--seed-file"); ap.add_argument("--out",required=True)
     ap.add_argument("--offset",type=int,default=0); ap.add_argument("--limit",type=int,default=50)
     ap.add_argument("--delay",type=float,default=3.0)
     args=ap.parse_args()
 
     out=Path(args.out); out.mkdir(parents=True,exist_ok=False)
-    if args.seed_file:\n        seeds=choose_seed_file(Path(args.seed_file),args.offset,args.limit)\n    elif args.baseline:\n        seeds=choose_ids(find_db(Path(args.baseline)),args.offset,args.limit)\n    else:\n        ap.error("one of --seed-file or --baseline is required")
+    if args.seed_file:
+        seeds=choose_seed_file(Path(args.seed_file),args.offset,args.limit)
+    elif args.baseline:
+        seeds=choose_ids(find_db(Path(args.baseline)),args.offset,args.limit)
+    else:
+        ap.error("one of --seed-file or --baseline is required")
     (out/"seed_batch.json").write_text(json.dumps(seeds,ensure_ascii=False,indent=2),encoding="utf-8")
 
     records=[]; chapters=[]; logs=[]; blocked_hosts=set()
