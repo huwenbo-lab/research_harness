@@ -50,6 +50,33 @@ def choose_ids(db: Path, offset: int, limit: int):
     return [dict(rows[(start+i)%len(rows)]) for i in range(min(limit,len(rows)))]
 
 
+def choose_seed_file(path: Path, offset: int, limit: int) -> list[dict]:
+    rows = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        r = json.loads(line)
+        wid = str(r.get("platform_work_id") or r.get("work_id") or "").strip()
+        if not wid.isdigit():
+            continue
+        if "qidian" == "jjwxc":
+            genre = r.get("genre_raw") or r.get("genre")
+            if genre is not None and "-" not in str(genre):
+                continue
+        rows[wid] = {
+            "platform_work_id": wid,
+            "title": r.get("title"),
+            "author": r.get("author"),
+            "status_raw": r.get("status_raw") or r.get("status"),
+            "work_url": r.get("work_url"),
+        }
+    ordered = [rows[k] for k in sorted(rows, key=lambda x: int(x))]
+    if not ordered:
+        return []
+    start = offset % len(ordered)
+    return [ordered[(start + i) % len(ordered)] for i in range(min(limit, len(ordered)))]
+
+
 def fetch(url: str, accept: str, referer: str):
     req=Request(url,headers={
       "User-Agent":UA_MOBILE,
@@ -219,7 +246,7 @@ def main():
     args=ap.parse_args()
 
     out=Path(args.out); out.mkdir(parents=True,exist_ok=False)
-    seeds=choose_ids(find_db(Path(args.baseline)),args.offset,args.limit)
+    if args.seed_file:\n        seeds=choose_seed_file(Path(args.seed_file),args.offset,args.limit)\n    elif args.baseline:\n        seeds=choose_ids(find_db(Path(args.baseline)),args.offset,args.limit)\n    else:\n        ap.error("one of --seed-file or --baseline is required")
     (out/"seed_batch.json").write_text(json.dumps(seeds,ensure_ascii=False,indent=2),encoding="utf-8")
 
     records=[]; chapters=[]; logs=[]; blocked_hosts=set()
