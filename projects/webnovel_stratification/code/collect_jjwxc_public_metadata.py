@@ -170,7 +170,12 @@ def main():
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=False)
-    if args.seed_file:\n        seeds = choose_seed_file(Path(args.seed_file), args.offset, args.limit)\n    elif args.baseline:\n        seeds = choose_ids(find_db(Path(args.baseline)), args.offset, args.limit)\n    else:\n        ap.error("one of --seed-file or --baseline is required")
+    if args.seed_file:
+        seeds = choose_seed_file(Path(args.seed_file), args.offset, args.limit)
+    elif args.baseline:
+        seeds = choose_ids(find_db(Path(args.baseline)), args.offset, args.limit)
+    else:
+        ap.error("one of --seed-file or --baseline is required")
     (out / "seed_batch.json").write_text(json.dumps(seeds, ensure_ascii=False, indent=2), encoding="utf-8")
 
     allowed, delay = robots_allowed()
