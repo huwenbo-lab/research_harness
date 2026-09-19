@@ -1,0 +1,55 @@
+name: JJWXC partition filter probe
+
+on:
+  push:
+    branches: [project/webnovel-stratification-pilot]
+    paths: [.github/workflows/webnovel-jjwxc-partition-probe.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: project/webnovel-stratification-pilot
+          persist-credentials: false
+      - run: python -m pip install 'beautifulsoup4>=4.12,<5'
+      - name: Probe public filter cells without deep pagination
+        run: |
+          python - <<'PY'
+          import json,sys
+          from pathlib import Path
+          from urllib.parse import urlencode
+          sys.path.insert(0,'projects/webnovel_stratification/code')
+          from collect_catalog import Collector,parse_jjwxc,BASE,utc
+          out=Path('jjwxc-partition-probe'); c=Collector(out,delay=5)
+          common={'version':1,'fw1':1,'fbsj2019':2019,'sortType':3,'page':1}
+          cells=[
+            ('year_only',{}),
+            ('original_yanqing_completed',{'yc1':1,'xx1':1,'isfinish':2}),
+            ('modern_love',{'yc1':1,'xx1':1,'isfinish':2,'sd1':1,'lx1':1}),
+            ('historical_love',{'yc1':1,'xx1':1,'isfinish':2,'sd4':4,'lx1':1}),
+          ]
+          result=[]
+          for name,extra in cells:
+            params={**common,**extra}; url=BASE+'?'+urlencode(params)
+            body=c.get(url,name+'.html')
+            if body is None:
+              result.append({'cell':name,'acquired':False}); continue
+            rows,meta=parse_jjwxc(body,url,c.logs[-1]['retrieved_at'])
+            result.append({'cell':name,'acquired':True,'rows':len(rows),'total_pages':meta['total_pages'],'current_page':meta['current_page'],'years':sorted({r['declared_pub_year'] for r in rows if r['declared_pub_year']}),'url':url})
+          (out/'partition_probe.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps(result,ensure_ascii=False,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jjwxc-partition-probe-${{ github.run_id }}
+          path: jjwxc-partition-probe/
+          retention-days: 30
+          if-no-files-found: error
