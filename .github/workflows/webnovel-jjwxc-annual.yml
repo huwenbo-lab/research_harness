@@ -1,8 +1,6 @@
 name: JJWXC annual catalog audit
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
 on:
-  push:
-    branches: [project/webnovel-stratification-pilot]
-    paths: [.github/workflows/webnovel-jjwxc-annual.yml]
   workflow_dispatch:
 permissions:
   contents: read

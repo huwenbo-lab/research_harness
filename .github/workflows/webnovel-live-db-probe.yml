@@ -1,11 +1,7 @@
 name: Live database integration probe
 
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
 on:
-  push:
-    branches: [project/webnovel-stratification-pilot]
-    paths:
-      - .github/workflows/webnovel-live-db-probe.yml
-      - projects/webnovel_stratification/code/update_live_database.py
   workflow_dispatch:
 
 permissions:

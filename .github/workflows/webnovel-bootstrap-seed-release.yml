@@ -1,9 +1,7 @@
 name: Bootstrap webnovel seed master release
 
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
 on:
-  push:
-    branches: [project/webnovel-stratification-pilot]
-    paths: [.github/workflows/webnovel-bootstrap-seed-release.yml]
   workflow_dispatch:
 
 permissions:

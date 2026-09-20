@@ -1,11 +1,7 @@
 name: Qidian catalog discovery probe
 
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
 on:
-  push:
-    branches: [project/webnovel-stratification-pilot]
-    paths:
-      - .github/workflows/webnovel-qidian-catalog.yml
-      - projects/webnovel_stratification/code/collect_qidian_catalog.py
   workflow_dispatch:
 
 permissions:

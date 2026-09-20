@@ -1,13 +1,7 @@
 name: Daily bounded JJWXC detail metadata harvest
 
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
 on:
-  push:
-    branches: [project/webnovel-stratification-pilot]
-    paths:
-      - .github/workflows/webnovel-jjwxc-detail-cloud.yml
-      - projects/webnovel_stratification/code/collect_jjwxc_public_metadata.py
-  schedule:
-    - cron: '17 21 * * *'
   workflow_dispatch:
 
 permissions:

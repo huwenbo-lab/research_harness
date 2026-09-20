@@ -1,8 +1,6 @@
 name: Recover observed editorial issue links v03
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
 on:
-  push:
-    branches: [project/webnovel-stratification-pilot]
-    paths: [.github/workflows/webnovel-editorial-links-v03.yml]
   workflow_dispatch:
 permissions:
   contents: read

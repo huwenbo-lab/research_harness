@@ -1,8 +1,6 @@
 name: Public date metadata supplement v04
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
 on:
-  push:
-    branches: [project/webnovel-stratification-pilot]
-    paths: [.github/workflows/webnovel-date-supplement-v04.yml]
   workflow_dispatch:
 permissions:
   contents: read

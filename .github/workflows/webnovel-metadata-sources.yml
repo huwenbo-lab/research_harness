@@ -1,8 +1,6 @@
 name: Webnovel metadata source recovery
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
 on:
-  push:
-    branches: [project/webnovel-stratification-pilot]
-    paths: [.github/workflows/webnovel-metadata-sources.yml]
   workflow_dispatch:
 permissions:
   contents: read

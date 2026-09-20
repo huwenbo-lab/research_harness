@@ -149,7 +149,7 @@ def parse_mobile_book(body: bytes, wid: str, url: str):
       "description":desc,"source_url":url,
       "structured_data_basis":"schema.org Book JSON-LD" if structured else None,
       "meta_fields":{k:v for k,v in metas.items() if any(t in k.lower() for t in ("novel","date","time","author","title"))},
-      "html_sha256":hashlib.sha256(body).hexdigest(),"html_bytes_transient":len(body),
+      "html_bytes_transient":len(body),
       "note":"HTML parsed transiently for metadata only; not retained."
     }
 

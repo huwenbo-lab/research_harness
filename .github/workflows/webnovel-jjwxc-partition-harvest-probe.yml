@@ -1,11 +1,7 @@
 name: JJWXC partition harvester probe
 
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
 on:
-  push:
-    branches: [project/webnovel-stratification-pilot]
-    paths:
-      - .github/workflows/webnovel-jjwxc-partition-harvest-probe.yml
-      - projects/webnovel_stratification/code/collect_jjwxc_partitioned_catalog.py
   workflow_dispatch:
 
 permissions:

@@ -1,8 +1,6 @@
 name: Rebuild catalog and dates v04
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
 on:
-  push:
-    branches: [project/webnovel-stratification-pilot]
-    paths: [.github/workflows/webnovel-build-v04.yml]
   workflow_dispatch:
 permissions:
   contents: read

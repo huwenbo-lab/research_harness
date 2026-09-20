@@ -1,13 +1,7 @@
 name: Seed master integration probe
 
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
 on:
-  push:
-    branches: [project/webnovel-stratification-pilot]
-    paths:
-      - .github/workflows/webnovel-seed-master-probe.yml
-      - projects/webnovel_stratification/code/build_seed_master.py
-      - projects/webnovel_stratification/code/collect_qidian_api_metadata.py
-      - projects/webnovel_stratification/code/collect_jjwxc_public_metadata.py
   workflow_dispatch:
 
 permissions:

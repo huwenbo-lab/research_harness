@@ -1,8 +1,6 @@
 name: Webnovel historical issues v03
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
 on:
-  push:
-    branches: [project/webnovel-stratification-pilot]
-    paths: [.github/workflows/webnovel-history-v03.yml]
   workflow_dispatch:
 permissions:
   contents: read

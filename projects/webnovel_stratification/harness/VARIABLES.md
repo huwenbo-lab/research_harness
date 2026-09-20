@@ -1,5 +1,42 @@
 # VARIABLES
 
+## Current acquisition layer (2026-09-20)
+
+下文原有表定义继续作为历史研究规格。当前采集使用
+`data/derived/distributed/{cloud,local,coordinator}.sqlite` 中的 `crawl_*` 表，
+其中 cloud 只采起点、local 只采晋江，coordinator 只合并两者的观测。
+后续汇总以 `coordinator.sqlite` 为准；原 `data/derived/crawler.sqlite`
+保留为分工前基线，原始 27 张表保持不变。
+
+| Table / field | Current meaning |
+|---|---|
+| `crawl_works` | One current row per `(platform, work_id)`; field provenance and extra metadata remain in JSON |
+| `sample_class` | Preliminary genre-based label, not the final inclusion rule; missing genre stays unresolved |
+| `crawl_observations` | 不可变解析结果、来源 URL、观测时间和覆盖状态；合并保留源行的 `observation_id`、`recorded_at`、`observed_at`、`observed_ts`、`time_basis`、`source_kind` 和 `result_json`；历史导入的未知观测时间不补造 |
+| `result_json.meta.collector_node`, `result_json.meta.collection_plan` | 分工后新采集观测的来源节点（`cloud` / `local`）及计划 ID；当前计划为 `2f852998f23d432eb45a6c5606f06cfc` |
+| `crawl_meta`（键 `distribution_plan`、`node_id`） | 固定平台归属计划及本库角色；计划原件见 `data/derived/distributed/plan.json` |
+| `crawl_date_evidence` | All observed/source dates, including chapter-level dates; not all are work publication dates |
+| `crawl_work_dates` | One current value per work and date role, with source and basis; conflicting evidence remains retained |
+| `crawl_chapters` | Metadata only; chapter publication and update times are separate; unavailable links do not establish first publication |
+| `crawl_jobs` | 本库持久任务队列；合并可以生成后续任务，但不复制源节点的租约、完成状态或执行次数；coordinator 队列不表示节点执行进度 |
+| `crawl_pages` | 分页观测证据；`unresolved` 不表示目录覆盖已完成 |
+| `crawl_merge_log` | 每次合并的来源节点、计划、来源文件路径、合并时间与新增/已知观测数；`source_queue_json`、`source_platforms_json` 保留源快照的执行状态，不代表实时状态 |
+
+Date roles distinguish `catalog_publication`, `platform_publication`,
+`first_chapter_publication`, `last_update`, and `completion_candidate`.
+`first_observed_chapter_publication`, `last_observed_chapter_publication`, and
+`last_observed_chapter_update` describe the visible directory endpoints, not
+necessarily the original first chapter, final chapter, or whole-work update.
+Older imported date roles retain their original interpretation; they were not
+all independently validated by the new collector. Equivalent complete timestamps
+at the same precision are compared without changing their raw representation;
+a platform-page timestamp without a timezone is interpreted as UTC+08 for that
+comparison. Dates, years and different precision levels stay distinct. A completion candidate is
+never automatically promoted to a verified completion date.
+
+Qidian's display word counts may be rounded in units of ten thousand; the
+HTML adapter preserves `word_count_raw` and `word_count_is_approximate`.
+
 ## A. work_master
 
 Primary key: `platform + work_id`.

@@ -1,8 +1,6 @@
 name: Webnovel catalog source pilot
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
 on:
-  push:
-    branches: [project/webnovel-stratification-pilot]
-    paths: [.github/workflows/webnovel-catalog-pilot.yml]
   workflow_dispatch:
 permissions:
   contents: read

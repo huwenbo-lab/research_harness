@@ -1,13 +1,7 @@
 name: Daily bounded Qidian metadata harvest
 
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
 on:
-  push:
-    branches: [project/webnovel-stratification-pilot]
-    paths:
-      - .github/workflows/webnovel-qidian-cloud.yml
-      - projects/webnovel_stratification/code/collect_qidian_api_metadata.py
-  schedule:
-    - cron: '47 20 * * *'
   workflow_dispatch:
 
 permissions:
