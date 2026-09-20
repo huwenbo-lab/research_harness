@@ -1,0 +1,44 @@
+name: Public date metadata supplement v04
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Retrieve five identified metadata resources, without user records
+        run: |
+          python - <<'PY'
+          import subprocess,json,hashlib,time
+          from pathlib import Path
+          out=Path('date-supplement');out.mkdir();logs=[]
+          targets=[
+           ('https://raw.githubusercontent.com/dylan-byte-max/novel-tracker/main/data/qidian/collection.json','qidian_collection.json','78441544206ea976dc730e75583424e0e7e64e6d'),
+           ('https://raw.githubusercontent.com/dylan-byte-max/novel-tracker/main/data/qidian/latest.json','qidian_latest.json',None),
+           ('https://dataverse.nl/api/access/datafile/455217','qidianFreeChapterDates.zip',None),
+           ('https://dataverse.nl/api/access/datafile/455218','qidianFreeChapterMeta.zip',None),
+           ('https://dataverse.nl/api/access/datafile/455184','webnovelFreeChapterDates.zip',None)]
+          for url,name,expected in targets:
+              record=dict(url=url,file=name,retrieved_at=time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()))
+              p=out/name
+              try:
+                  r=subprocess.run(['curl','-4','--location','--fail','--silent','--show-error','--connect-timeout','8','--max-time','30','--max-filesize','30000000','--user-agent','WebnovelBibliographyResearch/0.4 (+https://github.com/huwenbo-lab/research_harness)','--output',str(p),'--write-out','%{http_code}',url],capture_output=True,text=True,timeout=35)
+                  if r.returncode:raise ValueError(r.stderr)
+                  b=p.read_bytes();g=hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest()
+                  record.update(status=int(r.stdout[-3:]),bytes=len(b),sha256=hashlib.sha256(b).hexdigest(),git_blob_sha=g,expected_git_blob=expected)
+                  if expected and g!=expected:raise ValueError('source_changed_requires_revalidation')
+                  if name.endswith('.zip') and not b.startswith(b'PK'):raise ValueError('not_zip_metadata')
+              except Exception as e:
+                  record['error']=str(e);record.setdefault('status','error')
+              logs.append(record);(out/'retrieval_log.json').write_text(json.dumps(logs,ensure_ascii=False,indent=2));print(json.dumps(record),flush=True);time.sleep(2)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: webnovel-v04-date-supplement
+          path: date-supplement/
+          retention-days: 30
+          if-no-files-found: error

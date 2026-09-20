@@ -1,0 +1,64 @@
+name: Live database integration probe
+
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: project/webnovel-stratification-pilot
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: seed-master-probe-35430078578
+          run-id: '35430078578'
+          github-token: ${{ github.token }}
+          path: seeds
+      - uses: actions/download-artifact@v4
+        with:
+          name: qidian-metadata-35398213714-2071400
+          run-id: '35398213714'
+          github-token: ${{ github.token }}
+          path: harvest/qidian
+      - uses: actions/download-artifact@v4
+        with:
+          name: jjwxc-detail-35398213714-2071400
+          run-id: '35398213714'
+          github-token: ${{ github.token }}
+          path: harvest/jjwxc
+      - uses: actions/download-artifact@v4
+        with:
+          name: jjwxc-catalog-35398213714-2013
+          run-id: '35398213714'
+          github-token: ${{ github.token }}
+          path: harvest/jjwxc-catalog
+      - name: Build and validate live metadata database
+        run: |
+          python -m py_compile projects/webnovel_stratification/code/update_live_database.py
+          python projects/webnovel_stratification/code/update_live_database.py \
+            --seed-dir seeds --harvest-root harvest --out live-db
+          python - <<'PY'
+          import json,sqlite3
+          s=json.load(open('live-db/live_database_summary.json',encoding='utf-8'))
+          assert s['integrity']=='ok',s
+          assert s['counts']['qidian_works']>=3374,s['counts']
+          assert s['counts']['jjwxc_works']>=24667,s['counts']
+          assert s['counts']['works_with_publication_date']>=100,s['counts']
+          assert s['counts']['chapters']>10000,s['counts']
+          print(s['counts'])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: live-db-probe-${{ github.run_id }}
+          path: live-db/
+          retention-days: 30
+          if-no-files-found: error

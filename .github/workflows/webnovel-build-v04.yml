@@ -1,0 +1,64 @@
+name: Rebuild catalog and dates v04
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-structured-database-v03
+          run-id: '35316738666'
+          github-token: ${{ github.token }}
+          path: baseline
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-v04-jjwxc
+          run-id: '35318775011'
+          github-token: ${{ github.token }}
+          path: new/jjwxc
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-v04-repositories
+          run-id: '35318775011'
+          github-token: ${{ github.token }}
+          path: new/repositories
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-v04-date-supplement
+          run-id: '35320033565'
+          github-token: ${{ github.token }}
+          path: new/supplement
+      - run: python -m pip install 'beautifulsoup4>=4.12,<5'
+      - name: Offline build and regression checks
+        run: |
+          python -m py_compile projects/webnovel_stratification/code/date_parser_v04.py projects/webnovel_stratification/code/extend_catalog_dates_v04.py
+          python projects/webnovel_stratification/code/extend_catalog_dates_v04.py --baseline baseline --new new --out v04
+          python - <<'PY'
+          import json,sqlite3
+          from pathlib import Path
+          s=json.loads(Path('v04/audit/build_summary_v04.json').read_text())
+          assert s['final_counts']=={'jjwxc':27766,'qidian':3345},s
+          assert all(s['tests'].values()),s
+          c=sqlite3.connect('v04/data/derived/webnovel_catalog.sqlite')
+          assert c.execute('select count(*) from work_dates where first_chapter_publication_date is not null').fetchone()[0]==31
+          assert c.execute('select count(*) from work_dates where external_start_year_candidate is not null').fetchone()[0]==1325
+          assert c.execute('select count(*) from work_dates where catalog_vs_chapter_pub_year_conflict=1').fetchone()[0]==3
+          assert c.execute('select count(*) from work_dates where completion_date_verified is not null').fetchone()[0]==0
+          print('Catalog size and typed publication/end-date regression checks passed.')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: webnovel-structured-database-v04
+          path: v04/
+          retention-days: 30
+          if-no-files-found: error

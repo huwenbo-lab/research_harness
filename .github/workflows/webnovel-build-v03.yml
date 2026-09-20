@@ -1,0 +1,93 @@
+name: Rebuild structured webnovel database v03
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-structured-database-v02
+          run-id: '35290919803'
+          github-token: ${{ github.token }}
+          path: baseline
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-v03-jjwxc
+          run-id: '35315139621'
+          github-token: ${{ github.token }}
+          path: new/jjwxc
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-v03-repos
+          run-id: '35315139621'
+          github-token: ${{ github.token }}
+          path: new/repos
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-v03-archives
+          run-id: '35315139621'
+          github-token: ${{ github.token }}
+          path: new/archives
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-v03-old-repos
+          run-id: '35315265964'
+          github-token: ${{ github.token }}
+          path: new/old_repos
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-v03-history-editorial
+          run-id: '35315487469'
+          github-token: ${{ github.token }}
+          path: new/history_editorial
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-v03-history-archives
+          run-id: '35315487469'
+          github-token: ${{ github.token }}
+          path: new/history_archives
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-v03-editorial-links
+          run-id: '35315900242'
+          github-token: ${{ github.token }}
+          path: new/editorial_links
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-v03-catalog-pagination
+          run-id: '35316012846'
+          github-token: ${{ github.token }}
+          path: new/catalog_pagination
+      - run: python -m pip install 'beautifulsoup4>=4.12,<5'
+      - name: Rebuild and test structured database
+        run: |
+          python -m py_compile projects/webnovel_stratification/code/extend_database_v03.py
+          python projects/webnovel_stratification/code/extend_database_v03.py --baseline baseline --new new --out v03
+          python - <<'PY'
+          import json,sqlite3
+          from pathlib import Path
+          s=json.loads(Path('v03/audit/build_summary.json').read_text())
+          assert s['final_work_counts']=={'jjwxc':17671,'qidian':2558},s
+          assert s['table_counts']['legacy_bibliography']==67617
+          assert s['table_counts']['ranking_entry']==275
+          assert s['table_counts']['editorial_entry']==401
+          assert s['table_counts']['chapter_metadata']==13684
+          assert all(s['tests'].values()),s['tests']
+          print('Independent reconstruction matched expected counts; all checks passed.')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: webnovel-structured-database-v03
+          path: v03/
+          retention-days: 30
+          if-no-files-found: error

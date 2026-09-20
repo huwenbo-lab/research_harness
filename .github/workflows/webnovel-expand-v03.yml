@@ -1,0 +1,31 @@
+name: Webnovel three-layer expansion v03
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [repos, jjwxc, archives]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install HTML parser
+        run: python -m pip install 'beautifulsoup4>=4.12,<5'
+      - name: Recover bounded public metadata batch
+        env:
+          PYTHONUNBUFFERED: '1'
+        run: python projects/webnovel_stratification/code/expand_sources_v03.py '${{ matrix.mode }}' --out 'recovered-${{ matrix.mode }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: webnovel-v03-${{ matrix.mode }}
+          path: recovered-${{ matrix.mode }}/
+          retention-days: 30
+          if-no-files-found: error

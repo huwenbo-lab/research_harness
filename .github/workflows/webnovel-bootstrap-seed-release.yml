@@ -1,0 +1,32 @@
+name: Bootstrap webnovel seed master release
+
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: seed-master-probe-35430078578
+          run-id: '35430078578'
+          github-token: ${{ github.token }}
+          path: seed-master
+      - name: Publish current seed master
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view webnovel-master --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create webnovel-master --repo "$GITHUB_REPOSITORY" --target main \
+              --title 'Webnovel dynamic seed master' \
+              --notes 'Deduplicated platform work-ID queues for automated metadata enrichment.'
+          gh release upload webnovel-master seed-master/qidian-seeds.jsonl \
+            seed-master/jjwxc-seeds.jsonl seed-master/seed_master_summary.json \
+            --repo "$GITHUB_REPOSITORY" --clobber

@@ -1,12 +1,25 @@
-name: Webnovel daily metadata scheduler
+name: Durable webnovel metadata collection
 
+# Normal runs require an explicitly bootstrapped, audited cloud-node snapshot.
+# The one-time dispatch inputs name two .sqlite.gz assets in this repository's
+# fixed webnovel-crawler-bootstrap release; no arbitrary URL or empty init exists.
+# Each five-minute Qidian batch is exported, audited, and published before the
+# next batch. Assets retain the true run/attempt and add an independent batch ID.
 on:
-  push:
-    branches: [main]
-    paths: [.github/workflows/webnovel-daily-scheduler.yml]
   schedule:
-    - cron: '23 19 * * *'
+    - cron: '23 3,15 * * *'
   workflow_dispatch:
+    inputs:
+      bootstrap_source_asset:
+        description: 'First start only: cloud snapshot asset in webnovel-crawler-bootstrap'
+        required: false
+        type: string
+        default: ''
+      bootstrap_previous_asset:
+        description: 'First start only: predecessor snapshot asset in the same staging release'
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
@@ -17,409 +30,51 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  ensure-release:
+  collect:
     runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.release.outputs.tag }}
-    steps:
-      - id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="webnovel-harvest-$(date -u +%Y%m)"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target main \
-              --title "Webnovel harvest $(date -u +%Y-%m)" \
-              --notes "Automated public bibliographic and date metadata batches. Novel prose is not retained."
-
-  qidian-catalog:
-    needs: ensure-release
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        shard: [0, 1, 2]
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: projects/webnovel_stratification
+    env:
+      PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: project/webnovel-stratification-pilot
           persist-credentials: false
-      - name: Select deterministic Qidian partition
-        shell: bash
-        run: |
-          python - <<'PY' >> "$GITHUB_ENV"
-          import time
-          shard=${{ matrix.shard }}
-          day=int(time.time()//86400)
-          cats=['21','22','4','15','5','7','9','10','12']
-          total_cells=len(cats)*5*2
-          task=(day*3+shard)%(total_cells*5)
-          cell=task%total_cells
-          block=(task//total_cells)%5
-          cat=cats[cell//10]
-          rem=cell%10
-          print('cat_id='+cat)
-          print('size_id='+str(rem//2+1))
-          print('status_id='+str(rem%2+1))
-          print('start_page='+str(block*100+1))
-          print('task_id='+str(task))
-          PY
-      - name: Harvest official Qidian mobile category API
-        run: |
-          python -m py_compile projects/webnovel_stratification/code/collect_qidian_catalog.py
-          python projects/webnovel_stratification/code/collect_qidian_catalog.py \
-            --out qidian-catalog \
-            --gender male \
-            --cat-ids "$cat_id" \
-            --size "$size_id" \
-            --isfinish "$status_id" \
-            --start-page "$start_page" \
-            --pages 100 \
-            --delay 3
-      - name: Persist Qidian catalog batch
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.ensure-release.outputs.tag }}
-        run: |
-          stamp=$(date -u +%Y%m%d)
-          asset="qidian-catalog-${stamp}-task${task_id}.tar.gz"
-          tar -czf "$asset" qidian-catalog
-          gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
-      - uses: actions/upload-artifact@v4
-        if: always()
+      - uses: actions/setup-python@v5
         with:
-          name: qidian-catalog-${{ github.run_id }}-${{ matrix.shard }}
-          path: qidian-catalog/
-          retention-days: 90
-          if-no-files-found: error
+          python-version: '3.14'
+      - name: Install collection dependencies
+        run: python -m pip install -r requirements.txt
 
+      - name: Check collection and persistence contracts
+        run: |
+          python -m unittest discover -s tests -p 'test_crawler*.py'
+          python -m unittest discover -s tests -p 'test_cloud_*.py'
+          python -m unittest discover -s tests -p 'test_local_service.py'
 
-  jjwxc-partition:
-    needs: [ensure-release, qidian-catalog]
-    if: always() && needs.ensure-release.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: project/webnovel-stratification-pilot
-          persist-credentials: false
-      - run: python -m pip install 'beautifulsoup4>=4.12,<5'
-      - name: Select deterministic public JJWXC partition
-        shell: bash
-        run: |
-          python - <<'PY' >> "$GITHUB_ENV"
-          import time
-          day=int(time.time()//86400)
-          years=list(range(2005,2026))
-          ycs=[1,2]
-          xxs=[1,2,3,5,6]
-          finishes=[1,2]
-          cells=[(y,yc,xx,f) for y in years for yc in ycs for xx in xxs for f in finishes]
-          y,yc,xx,finish=cells[day%len(cells)]
-          print('part_year='+str(y))
-          print('part_yc='+str(yc))
-          print('part_xx='+str(xx))
-          print('part_finish='+str(finish))
-          print('part_id='+str(day%len(cells)))
-          PY
-      - name: Harvest one recursively partitioned public catalog cell
-        run: |
-          python -m py_compile projects/webnovel_stratification/code/collect_jjwxc_partitioned_catalog.py
-          python projects/webnovel_stratification/code/collect_jjwxc_partitioned_catalog.py \
-            --out jjwxc-partition \
-            --year "$part_year" --yc "$part_yc" --xx "$part_xx" --isfinish "$part_finish" \
-            --max-pages 10 --request-budget 80 --delay 3
-      - name: Persist JJWXC partition batch
-        if: always()
+      - name: Restore and run up to three durable cloud-node batches
+        id: cycle
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.ensure-release.outputs.tag }}
+          BOOTSTRAP_SOURCE_ASSET: ${{ inputs.bootstrap_source_asset }}
+          BOOTSTRAP_PREVIOUS_ASSET: ${{ inputs.bootstrap_previous_asset }}
         run: |
-          stamp=$(date -u +%Y%m%d)
-          asset="jjwxc-partition-${stamp}-cell${part_id}.tar.gz"
-          tar -czf "$asset" jjwxc-partition
-          gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: jjwxc-partition-${{ github.run_id }}-${{ env.part_id }}
-          path: jjwxc-partition/
-          retention-days: 90
-          if-no-files-found: error
+          python code/cloud_cycle.py --repo "$GITHUB_REPOSITORY" \
+            --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --target "$GITHUB_SHA" \
+            --db state/crawler.sqlite --out out --batches 3 \
+            --max-requests 50 --max-seconds 300 \
+            --bootstrap-source-asset "$BOOTSTRAP_SOURCE_ASSET" \
+            --bootstrap-previous-asset "$BOOTSTRAP_PREVIOUS_ASSET"
 
-  jjwxc-catalog:
-    needs: [ensure-release, qidian-catalog]
-    if: always() && needs.ensure-release.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
+      - name: Retain diagnostics for completed, interrupted, and blocked batches
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
         with:
-          ref: project/webnovel-stratification-pilot
-          persist-credentials: false
-      - run: python -m pip install 'beautifulsoup4>=4.12,<5'
-      - name: Harvest one public JJWXC annual catalog page
-        shell: bash
-        run: |
-          RUN_DAY="$(date -u +%Y%m%d)"
-          DAY_INDEX="$(( $(date -u +%s) / 86400 ))"
-          YEAR="$(( 2005 + (DAY_INDEX % 21) ))"
-          echo "year=$YEAR" >> "$GITHUB_ENV"
-          python projects/webnovel_stratification/code/collect_catalog.py \
-            --out jjwxc-catalog \
-            --start "$YEAR" --end "$YEAR" \
-            --pages-per-year 1 --seed "$RUN_DAY" --delay 5
-      - name: Persist JJWXC catalog batch
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.ensure-release.outputs.tag }}
-        run: |
-          stamp=$(date -u +%Y%m%d)
-          asset="jjwxc-catalog-${stamp}-${year}.tar.gz"
-          tar -czf "$asset" jjwxc-catalog
-          gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: jjwxc-catalog-${{ github.run_id }}-${{ env.year }}
-          path: jjwxc-catalog/
-          retention-days: 90
-          if-no-files-found: error
-
-
-  refresh-seed-master:
-    needs: [ensure-release, qidian-catalog, jjwxc-partition, jjwxc-catalog]
-    if: always() && needs.ensure-release.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    outputs:
-      qidian_count: ${{ steps.counts.outputs.qidian_count }}
-      jjwxc_count: ${{ steps.counts.outputs.jjwxc_count }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: project/webnovel-stratification-pilot
-          persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          name: webnovel-structured-database-v04
-          run-id: '35320781239'
-          github-token: ${{ github.token }}
-          path: baseline
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: qidian-catalog-${{ github.run_id }}-*
-          path: harvest/qidian
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: jjwxc-catalog-${{ github.run_id }}-*
-          path: harvest/jjwxc
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: jjwxc-partition-${{ github.run_id }}-*
-          path: harvest/jjwxc-partition
-      - name: Download previous seed master when present
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p existing
-          gh release download webnovel-master --repo "$GITHUB_REPOSITORY" \
-            --pattern 'qidian-seeds.jsonl' --pattern 'jjwxc-seeds.jsonl' \
-            --dir existing --clobber || true
-      - name: Merge newly discovered work IDs into persistent seed masters
-        id: counts
-        run: |
-          python -m py_compile projects/webnovel_stratification/code/build_seed_master.py
-          python projects/webnovel_stratification/code/build_seed_master.py \
-            --baseline baseline \
-            --harvest-root harvest \
-            --existing-qidian existing/qidian-seeds.jsonl \
-            --existing-jjwxc existing/jjwxc-seeds.jsonl \
-            --out seed-master
-          echo "qidian_count=$(wc -l < seed-master/qidian-seeds.jsonl)" >> "$GITHUB_OUTPUT"
-          echo "jjwxc_count=$(wc -l < seed-master/jjwxc-seeds.jsonl)" >> "$GITHUB_OUTPUT"
-      - name: Persist latest seed master
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view webnovel-master --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create webnovel-master --repo "$GITHUB_REPOSITORY" --target main \
-              --title 'Webnovel dynamic seed master' \
-              --notes 'Current deduplicated platform work-ID queues generated from official public catalog harvests.'
-          gh release upload webnovel-master seed-master/qidian-seeds.jsonl \
-            seed-master/jjwxc-seeds.jsonl seed-master/seed_master_summary.json \
-            --repo "$GITHUB_REPOSITORY" --clobber
-      - uses: actions/upload-artifact@v4
-        with:
-          name: webnovel-seed-master-${{ github.run_id }}
-          path: seed-master/
-          retention-days: 90
-          if-no-files-found: error
-
-  jjwxc-detail:
-    needs: [ensure-release, refresh-seed-master]
-    if: always() && needs.ensure-release.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: project/webnovel-stratification-pilot
-          persist-credentials: false
-      - name: Download current JJWXC seed master
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p seeds
-          gh release download webnovel-master --repo "$GITHUB_REPOSITORY" \
-            --pattern 'jjwxc-seeds.jsonl' --dir seeds --clobber
-      - run: python -m pip install 'beautifulsoup4>=4.12,<5'
-      - name: Harvest JJWXC public work and chapter-date metadata
-        shell: bash
-        run: |
-          N=$(wc -l < seeds/jjwxc-seeds.jsonl)
-          BLOCKS=$(( (N + 99) / 100 ))
-          DAY_INDEX=$(( $(date -u +%s) / 86400 ))
-          BLOCK=$(( DAY_INDEX % BLOCKS ))
-          OFFSET=$((BLOCK*100))
-          echo "offset=$OFFSET" >> "$GITHUB_ENV"
-          echo "block_id=$BLOCK" >> "$GITHUB_ENV"
-          python projects/webnovel_stratification/code/collect_jjwxc_public_metadata.py \
-            --seed-file seeds/jjwxc-seeds.jsonl --out jjwxc-detail --offset "$OFFSET" --limit 100
-      - name: Persist JJWXC detail batch
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.ensure-release.outputs.tag }}
-        run: |
-          stamp=$(date -u +%Y%m%d)
-          asset="jjwxc-detail-${stamp}-block${block_id}.tar.gz"
-          tar -czf "$asset" jjwxc-detail
-          gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: jjwxc-detail-${{ github.run_id }}-${{ env.block_id }}
-          path: jjwxc-detail/
-          retention-days: 90
-          if-no-files-found: error
-
-  qidian-metadata:
-    needs: [ensure-release, refresh-seed-master, jjwxc-detail]
-    if: always() && needs.ensure-release.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: project/webnovel-stratification-pilot
-          persist-credentials: false
-      - name: Download current Qidian seed master
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p seeds
-          gh release download webnovel-master --repo "$GITHUB_REPOSITORY" \
-            --pattern 'qidian-seeds.jsonl' --dir seeds --clobber
-      - name: Harvest Qidian public work and chapter-catalog metadata
-        shell: bash
-        run: |
-          python -m pip install 'beautifulsoup4>=4.12,<5'
-          N=$(wc -l < seeds/qidian-seeds.jsonl)
-          BLOCKS=$(( (N + 49) / 50 ))
-          DAY_INDEX=$(( $(date -u +%s) / 86400 ))
-          BLOCK=$(( DAY_INDEX % BLOCKS ))
-          OFFSET=$((BLOCK*50))
-          echo "offset=$OFFSET" >> "$GITHUB_ENV"
-          echo "block_id=$BLOCK" >> "$GITHUB_ENV"
-          python -m py_compile projects/webnovel_stratification/code/collect_qidian_api_metadata.py
-          python projects/webnovel_stratification/code/collect_qidian_api_metadata.py \
-            --seed-file seeds/qidian-seeds.jsonl --out qidian-metadata --offset "$OFFSET" --limit 50 --delay 4
-      - name: Persist Qidian detail batch
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.ensure-release.outputs.tag }}
-        run: |
-          stamp=$(date -u +%Y%m%d)
-          asset="qidian-detail-${stamp}-block${block_id}.tar.gz"
-          tar -czf "$asset" qidian-metadata
-          gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY" --clobber
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: qidian-metadata-${{ github.run_id }}-${{ env.block_id }}
-          path: qidian-metadata/
-          retention-days: 90
-          if-no-files-found: error
-
-  update-live-database:
-    needs: [ensure-release, refresh-seed-master, qidian-metadata]
-    if: always() && needs.refresh-seed-master.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: project/webnovel-stratification-pilot
-          persist-credentials: false
-      - name: Download current persistent seed masters and prior live database
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p seeds previous harvest-archives harvest
-          gh release download webnovel-master --repo "$GITHUB_REPOSITORY" \
-            --pattern 'qidian-seeds.jsonl' --pattern 'jjwxc-seeds.jsonl' \
-            --dir seeds --clobber
-          gh release download webnovel-live --repo "$GITHUB_REPOSITORY" \
-            --pattern 'webnovel-latest.sqlite' --dir previous --clobber || true
-      - name: Download all durable metadata batches from the current month
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.ensure-release.outputs.tag }}
-        run: |
-          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern '*.tar.gz' --dir harvest-archives --clobber || true
-          i=0
-          shopt -s nullglob
-          for file in harvest-archives/*.tar.gz; do
-            i=$((i+1))
-            mkdir -p "harvest/batch-$i"
-            tar -xzf "$file" -C "harvest/batch-$i"
-          done
-      - name: Incrementally build ready-to-use metadata database
-        run: |
-          python -m py_compile projects/webnovel_stratification/code/update_live_database.py
-          EXISTING=""
-          if [ -f previous/webnovel-latest.sqlite ]; then
-            EXISTING="--existing-db previous/webnovel-latest.sqlite"
-          fi
-          python projects/webnovel_stratification/code/update_live_database.py \
-            $EXISTING --seed-dir seeds --harvest-root harvest --out live-db
-      - name: Persist current ready-to-use database
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view webnovel-live --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
-            gh release create webnovel-live --repo "$GITHUB_REPOSITORY" --target main \
-              --title 'Current webnovel metadata database' \
-              --notes 'Continuously updated metadata-only research database. No novel prose is stored.'
-          gh release upload webnovel-live \
-            live-db/webnovel-latest.sqlite \
-            live-db/works_latest.csv \
-            live-db/work_dates_latest.csv \
-            live-db/live_database_summary.json \
-            --repo "$GITHUB_REPOSITORY" --clobber
-      - uses: actions/upload-artifact@v4
-        with:
-          name: webnovel-live-database-${{ github.run_id }}
-          path: live-db/
-          retention-days: 90
-          if-no-files-found: error
-
+          name: webnovel-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            projects/webnovel_stratification/out/**/*.json
+            projects/webnovel_stratification/state/restored.json
+          retention-days: 30
+          if-no-files-found: warn

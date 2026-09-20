@@ -1,0 +1,77 @@
+name: Extend observed catalog pagination v03
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: webnovel-v03-jjwxc
+          run-id: '35315139621'
+          github-token: ${{ github.token }}
+          path: prior
+      - run: python -m pip install 'beautifulsoup4>=4.12,<5'
+      - name: Follow catalog next-page links under a fixed request budget
+        run: |
+          python - <<'PY'
+          import sys,json,time
+          from pathlib import Path
+          sys.path.insert(0,'projects/webnovel_stratification/code')
+          from expand_sources_v03 import Fetcher
+          from collect_catalog import parse_jjwxc
+          f=Fetcher(Path('catalog-pagination'))
+          audits=json.loads(Path('prior/jjwxc_catalog_audit.json').read_text())
+          logs=json.loads(Path('prior/retrieval_log.json').read_text())
+          output=f.out/'observations.jsonl';output.write_text('',encoding='utf-8')
+          report=[];calls=0
+          # All years first get a small equal-depth extension; extra anchor pages follow.
+          queues={}
+          for a in audits:
+              if a.get('sort_label')!='最新发表' or not a.get('year_filter_validated'):continue
+              meta=a.get('pagination',{})
+              queues[a['year']]={'next':meta.get('next_url'),'last_page':1,'seen':set(),'stopped':None,'max_pages':15 if a['year'] in (2010,2015,2020,2025) else 3}
+          while calls<100:
+              progressed=False
+              for year,state in sorted(queues.items()):
+                  if 'www.jjwxc.net' in f.blocked:break
+                  if calls>=100 or not state['next'] or state['last_page']>=state['max_pages'] or state['stopped']:continue
+                  progressed=True;url=state['next'];expected=state['last_page']+1
+                  name=f'jjwxc_{year}_sort3_page{expected}.html'
+                  b=f.get(url,name,robots=True,delay=4);calls+=1
+                  if b is None:
+                      state['stopped']='request_failed';continue
+                  rows,meta=parse_jjwxc(b,url,f.logs[-1]['retrieved_at'])
+                  valid=bool(rows) and all(r['declared_pub_year']==year for r in rows) and meta.get('current_page')==expected
+                  ids={r['work_id'] for r in rows}
+                  status='accepted' if valid else 'invalid_year_or_page'
+                  if valid and ids and ids.issubset(state['seen']):status='repeated_page';valid=False
+                  report.append({'year':year,'page':expected,'file':name,'url':url,'rows':len(rows),'status':status,'total_pages_declared':meta.get('total_pages'),'next_url':meta.get('next_url')})
+                  if valid:
+                      with output.open('a',encoding='utf-8') as out:
+                          for i,r in enumerate(rows,1):
+                              r.update(raw_file=name,row_on_page=i,requested_year=year,requested_page=expected,sort_label='最新发表',sampling_note='bounded_latest_first_catalog_pages_not_probability_sample')
+                              out.write(json.dumps(r,ensure_ascii=False)+'\n')
+                      state['seen'].update(ids);state['last_page']=expected;state['next']=meta.get('next_url')
+                  else:state['stopped']=status
+                  (f.out/'pagination_audit.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+              if not progressed or 'www.jjwxc.net' in f.blocked:break
+          summary={str(y):{k:(len(v) if isinstance(v,set) else v) for k,v in s.items()} for y,s in queues.items()}
+          (f.out/'pagination_summary.json').write_text(json.dumps({'requests':calls,'years':summary,'host_stopped':list(f.blocked)},ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps({'requests':calls,'accepted_pages':sum(x['status']=='accepted' for x in report)}))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: webnovel-v03-catalog-pagination
+          path: catalog-pagination/
+          retention-days: 30
+          if-no-files-found: error

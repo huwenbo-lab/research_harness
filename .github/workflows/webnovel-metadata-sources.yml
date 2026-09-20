@@ -1,0 +1,63 @@
+name: Webnovel metadata source recovery
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Download public source files, not executable dependencies
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, time, hashlib, re, urllib.request, urllib.error, urllib.robotparser
+          from urllib.parse import quote
+          from pathlib import Path
+          out=Path('metadata-sources');out.mkdir();logs=[];budget=0
+          def get(url,name):
+              global budget
+              rec={'url':url,'file':name,'retrieved_at':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime())}
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'WebnovelBibliographyResearch/0.2 (+https://github.com/huwenbo-lab/research_harness)'}),timeout=18) as r:
+                      b=r.read(8*1024*1024+1); rec.update(status=r.status,bytes=len(b),sha256=hashlib.sha256(b).hexdigest(),content_type=r.headers.get('Content-Type'))
+                      if len(b)>8*1024*1024 or budget+len(b)>80*1024*1024: raise ValueError('size_budget')
+                      (out/name).write_bytes(b);budget+=len(b)
+                      if r.status!=200: return None
+                      return b
+              except Exception as e:rec.update(error=str(e));return None
+              finally:
+                  logs.append(rec);(out/'retrieval_log.json').write_text(json.dumps(logs,ensure_ascii=False,indent=2),encoding='utf-8');print(json.dumps(rec,ensure_ascii=False),flush=True);time.sleep(2)
+          repos=[('zeyu-acad/Qidian-Webnovel-Corpus','main'),('123miaomiao/qidian_spider','main'),('sanliyang/qidian_spider_Scrapy','main'),('xuduogui/qidianSpider','master'),('lanmaoxinqing/python-qidian-recommend','master'),('ikaixu/QiDian','master'),('GSD-Dreammark/spider_qidian','master'),('jiangyi-vento/qidian-analysis','master'),('chongchong12138/jjwxc-novel-analysis','master'),('HYL0924/QidianDataSever','main'),('dylan-byte-max/novel-tracker','main')]
+          inventory=[]
+          for repo,branch in repos:
+              key=repo.replace('/','__');b=get(f'https://api.github.com/repos/{repo}/git/trees/{branch}?recursive=1',key+'__tree.json')
+              if b is None:continue
+              obj=json.loads(b);commit=obj['sha'];selected=[]
+              for ent in obj.get('tree',[]):
+                  p=ent['path'];size=ent.get('size',0)
+                  if ent['type']!='blob' or not 100<=size<=8*1024*1024:continue
+                  if re.search(r'(node_modules|venv|\.idea|package-lock|tsconfig|config|setting|secret|credential)',p,re.I):continue
+                  if p.lower().endswith(('.csv','.json','.sql','.db','.sqlite','.sqlite3')) or p.rsplit('/',1)[-1] in ('README.md','LICENSE'):
+                      selected.append(ent)
+              for ent in sorted(selected,key=lambda x:(not x['path'].endswith('.csv'),x['path']))[:12]:
+                  p=ent['path'];name=key+'__'+p.replace('/','__')
+                  get(f'https://raw.githubusercontent.com/{repo}/{commit}/'+quote(p),name)
+                  inventory.append({'repo':repo,'commit':commit,'source_path':p,'file':name,'git_blob_sha':ent['sha'],'declared_size':ent['size']})
+          (out/'source_inventory.json').write_text(json.dumps(inventory,ensure_ascii=False,indent=2),encoding='utf-8')
+          rb=get('https://www.qidiantu.com/robots.txt','qidiantu_robots.txt')
+          if rb is not None and b'<html' not in rb.lower() and b'<script' not in rb.lower():
+              rp=urllib.robotparser.RobotFileParser();rp.parse(rb.decode('utf-8','replace').splitlines())
+              for p in ['/yuepiao/201411','/yuepiao/201512','/yuepiao/202012','/yuepiao/202512']:
+                  u='https://www.qidiantu.com'+p
+                  if rp.can_fetch('WebnovelBibliographyResearch',u):get(u,'qidiantu_'+p.rsplit('/',1)[-1]+'.html')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: webnovel-metadata-sources
+          path: metadata-sources/
+          retention-days: 30
+          if-no-files-found: error

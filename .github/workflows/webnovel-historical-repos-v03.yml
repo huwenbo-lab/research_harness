@@ -1,0 +1,33 @@
+name: Webnovel historical repository recovery v03
+# Historical entry point; automatic collection uses webnovel-daily-scheduler.yml.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python -m pip install 'beautifulsoup4>=4.12,<5'
+      - name: Fetch older public metadata snapshots
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0,'projects/webnovel_stratification/code')
+          import expand_sources_v03 as m
+          m.REPOS=[('skyline-123/qidian','master'),('kuwoyuki/qi-re','master'),('jinheshimingrichou/qidian_noval','master'),('shuaixiangzi/myQidian','master'),('shixiangheng/qidian','master'),('ITgyw/qidian1','main'),('pwb1997/JJWXC-Crawler','master'),('abbypan/jjwxc_point_per_word','master'),('xuduogui/QiDianAPI','master')]
+          f=m.Fetcher(Path('recovered-old-repos'))
+          m.recover_repositories(f)
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: webnovel-v03-old-repos
+          path: recovered-old-repos/
+          retention-days: 30
+          if-no-files-found: error
