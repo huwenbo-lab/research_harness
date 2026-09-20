@@ -1,6 +1,6 @@
 # Webnovel Stratification Project
 
-## 当前采集架构（2026-09-20，本地已实现）
+## 当前采集架构（2026-09-20，云端与本地分工）
 
 统一入口为 `code/crawl.py`。当前采用固定分工：云端采起点，本地采晋江，独立保存进度，
 再把观测合入本地总库。分工文件为 `data/derived/distributed/plan.json`；
@@ -57,6 +57,7 @@ local.sqlite → 晋江 worker → coordinator.sqlite → 完整快照 / CSV / �
 | `code/crawler_qidian_html.py` | 起点允许访问的公开分类页解析 |
 | `code/cloud_state.py` | 同仓库长期快照、恢复、首次发布与指针更新 |
 | `code/cloud_cycle.py` | 每次最多三小批，每批保存成功后再继续 |
+| `code/local_service.py` | macOS 后台批次、状态、暂停和校验后恢复 |
 | `.github/workflows/webnovel-daily-scheduler.yml` | 起点云端调度 |
 
 原采集器保留为历史代码和纯解析函数来源；后续运行使用新入口。
@@ -116,6 +117,8 @@ HTTP 层启动时会自检 robots 通配符和最长路径匹配语义，旧解�
 
 `code/local_service.py` 生成和控制 `com.huwenbo.webnovel.local` LaunchAgent。
 服务配置、暂停原因、运行回执与日志在 `data/derived/distributed/service/`。
+本机已安装到 `~/Library/LaunchAgents/com.huwenbo.webnovel.local.plist`，首次后台批次
+成功处理 33 个任务，新增 130 个作品 ID；运行状态保存在 `deployment.json` 和服务回执。
 默认每 35 分钟启动一批晋江采集，每批最多 50 次请求、300 秒。批间没有爬虫进程
 属于正常等待。不要同时手动运行同一个节点的 `watch`。
 
@@ -173,8 +176,8 @@ GitHub 对公开仓库还有[连续 60 天没有仓库活动自动禁用定时 w
 
 这些是本轮计数，持续采集后会变化。当前计数以 `status` 和导出摘要为准。
 `data/derived/crawler_migration_audit.json` 保存迁移审计；本轮联网批次、续跑及
-最终审计证据存放在同一 `data/derived/` 目录。本次完善后 **182 项测试全部通过**
-（采集、存储及分工合并 142 项、云端状态和分批运行 40 项）。测试使用模拟响应及本地保存的公开页，
+最终审计证据存放在同一 `data/derived/` 目录。正式部署前 **207 项测试全部通过**
+（采集、存储及分工合并 142 项、云端状态和分批运行 50 项、本地服务 15 项）。测试使用模拟响应及本地保存的公开页，
 另有真实库和三批联网验证；
 不能据此宣称长期运行稳定或全站覆盖完整。
 
@@ -202,24 +205,27 @@ GitHub 对公开仓库还有[连续 60 天没有仓库活动自动禁用定时 w
 - 原始 27 张表是历史研究包；`crawl_*` 是新采集层。新表不能与历史同名概念混用。
   旧版作品日期保留原有来源性质，没有重新宣称为经过当前解析器验证的首发或完结。
 
-### 云端部署状态
+### 云端部署与恢复
 
-新 workflow 已在本地改为每天 03:23、15:23 UTC（台北 11:23、23:23）运行，
+新 workflow 已通过 PR #1 发布到 main，定时已启用，每天 03:23、15:23 UTC（台北 11:23、23:23）运行，
 沿用同一个并发组，仅采起点；每次最多三批，每批最多 50 次请求、300 秒。
 每小批都导出、审计并发布后，才进入下一批，减少云端中断损失。每天理论预算最多
 300 次请求，包含 robots 等请求；实际成功采集量受响应速度、冷却和页面状态影响。
-恢复错节点、审计或发布失败时停止后续批次。尚未推送、发布初始
-快照或替换 main 分支调度。现有线上旧 workflow 仍按原逻辑运行。
+恢复错节点、审计或发布失败时停止后续批次。22 个旧 workflow 的 push/schedule
+自动触发已移除，只保留手动入口。实际运行状态以
+[GitHub Actions](https://github.com/huwenbo-lab/research_harness/actions/workflows/webnovel-daily-scheduler.yml)
+和本地 `data/derived/distributed/deployment.json` 为准；定时启用不等于此刻正有进程抓取。
 
-首次部署使用 `cloud_state.py bootstrap` 显式发布经过 `audit --node cloud` 审计的
-`distributed/cloud.sqlite`，参数包含
-`--repo`、`--db`、`--summary`、`--audit`、`--run-id`、`--attempt`、`--target`，
-再切换 main 的代码与 workflow。
-bootstrap 需要通过审计，并确认远端没有已有指针或旧快照；`--run-id` 使用实际初始化运行标识。日常运行
-绝不隐式 bootstrap。GitHub 指针资产替换本身不是原子的：若这一步中断，后续任务
+首次启动使用同仓库 `webnovel-crawler-bootstrap` release 的两个明确资产：
+`cloud.sqlite.gz` 和 `previous.sqlite.gz`。手动 dispatch 填入
+`bootstrap_source_asset=cloud.sqlite.gz`、`bootstrap_previous_asset=previous.sqlite.gz`。
+程序下载后在云端执行真实前驱保留性审计，再使用当前 GitHub run/attempt 标识初始化。
+bootstrap 确认远端没有已有指针或正式快照才会发布，日常运行绝不隐式初始化。
+首次初始化一旦成功，后续手动启动应留空两项输入；不要直接重新运行保留旧 bootstrap
+输入的初始化任务，否则已有状态保护会拒绝重复初始化。
+GitHub 指针资产替换本身不是原子的：若这一步中断，后续任务
 会停止，已经上传的唯一快照仍在，可据此恢复。
-本地模拟 cloud 节点的成功运行不等于 GitHub 云端已部署。分工切换需要同时替换旧
-线上调度，以免旧程序继续采晋江；发布前不启动长期本地采集。日后可用
+日后可用
 `cloud_state.py restore --repo OWNER/REPO --out /new/path/cloud.sqlite --receipt /new/path/restored.json`
 取得云端最新快照，再交给上述 `merge --source`。
 

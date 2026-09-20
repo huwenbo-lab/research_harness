@@ -20,7 +20,9 @@
 观测或日期证据。源节点执行状态不覆盖汇总库队列；`crawl_merge_log` 记录源快照
 状态，汇总库 `summary.json` 的队列计数不代表云端和本地的完成进度。
 云端 workflow 尚未发布，本地 `watch` 仅在进程存活时循环，无开机服务。
-当前代码验证为 142 项 crawler 测试和 40 项 cloud 测试通过；研究样本和年份覆盖
+后台服务的配置、逐批回执、暂停原因及日志保存在 `distributed/service/`；
+正式部署、运行记录及当次合并导出状态保存在 `distributed/deployment.json`。
+当前代码验证为 142 项 crawler、50 项 cloud 和 15 项 local service 测试通过；研究样本和年份覆盖
 仍需完成下述实质性试点审计。
 
 ## Pilot outputs
