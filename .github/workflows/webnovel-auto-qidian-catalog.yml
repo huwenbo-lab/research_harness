@@ -1,0 +1,81 @@
+name: Auto harvest Qidian catalog
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  harvest:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: project/webnovel-stratification-pilot
+          persist-credentials: false
+
+      - name: Select deterministic partition
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import time
+          shard=${{ matrix.shard }}
+          day=int(time.time()//86400)
+          cats=['21','22','4','15','5','7','9','10','12']
+          task=(day*2+shard)%(len(cats)*5*2*5)
+          block=task%5
+          cell=task//5
+          cat=cats[cell//10]
+          rem=cell%10
+          size=str(rem//2+1)
+          status=str(rem%2+1)
+          print('cat_id='+cat)
+          print('size_id='+size)
+          print('status_id='+status)
+          print('start_page='+str(block*100+1))
+          print('task_id='+str(task))
+          PY
+
+      - name: Harvest official mobile category API
+        run: |
+          python -m py_compile projects/webnovel_stratification/code/collect_qidian_catalog.py
+          python projects/webnovel_stratification/code/collect_qidian_catalog.py \
+            --out qidian-auto \
+            --gender male \
+            --cat-ids "$cat_id" \
+            --size "$size_id" \
+            --isfinish "$status_id" \
+            --start-page "$start_page" \
+            --pages 100 \
+            --delay 3
+
+      - name: Pack metadata batch
+        if: always()
+        run: |
+          stamp=$(date -u +%Y%m%d)
+          asset="qidian-catalog-${stamp}-task${task_id}.tar.gz"
+          tar -czf "$asset" qidian-auto
+          echo "asset=$asset" >> "$GITHUB_ENV"
+
+      - name: Persist batch in release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view webnovel-harvest >/dev/null 2>&1 || \
+            gh release create webnovel-harvest --title 'Webnovel harvest batches' --notes 'Automated public metadata batches; no novel prose.' || true
+          gh release upload webnovel-harvest "$asset" --clobber
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qidian-catalog-${{ github.run_id }}-${{ matrix.shard }}
+          path: qidian-auto/
+          retention-days: 90
+          if-no-files-found: error
