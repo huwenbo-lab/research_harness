@@ -1,6 +1,6 @@
 # OUTPUT_SPEC
 
-## Current acquisition outputs (2026-09-20)
+## Current acquisition outputs (2026-09-21)
 
 当前分工产物位于 `data/derived/distributed/`：
 
@@ -19,10 +19,11 @@
 合并必须保留原观测 UUID、来源、观测时间及节点/计划标记；重复合并不得增加重复
 观测或日期证据。源节点执行状态不覆盖汇总库队列；`crawl_merge_log` 记录源快照
 状态，汇总库 `summary.json` 的队列计数不代表云端和本地的完成进度。
-云端 workflow 尚未发布，本地 `watch` 仅在进程存活时循环，无开机服务。
+云端 workflow 已部署，本地由登录后自动加载的 LaunchAgent 每 35 分钟调度。
+当前范围为 `work_date_endpoints`；仅保留有限章节边界证据和作品日期，历史逐章记录继续保留。
 后台服务的配置、逐批回执、暂停原因及日志保存在 `distributed/service/`；
 正式部署、运行记录及当次合并导出状态保存在 `distributed/deployment.json`。
-当前代码验证为 142 项 crawler、50 项 cloud 和 15 项 local service 测试通过；研究样本和年份覆盖
+当前代码验证为 160 项 crawler、51 项 cloud 和 15 项 local service 测试通过；研究样本和年份覆盖
 仍需完成下述实质性试点审计。
 
 ## Pilot outputs

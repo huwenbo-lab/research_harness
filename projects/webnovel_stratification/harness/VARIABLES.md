@@ -1,6 +1,6 @@
 # VARIABLES
 
-## Current acquisition layer (2026-09-20)
+## Current acquisition layer (2026-09-21)
 
 下文原有表定义继续作为历史研究规格。当前采集使用
 `data/derived/distributed/{cloud,local,coordinator}.sqlite` 中的 `crawl_*` 表，
@@ -17,10 +17,18 @@
 | `crawl_meta`（键 `distribution_plan`、`node_id`） | 固定平台归属计划及本库角色；计划原件见 `data/derived/distributed/plan.json` |
 | `crawl_date_evidence` | All observed/source dates, including chapter-level dates; not all are work publication dates |
 | `crawl_work_dates` | One current value per work and date role, with source and basis; conflicting evidence remains retained |
-| `crawl_chapters` | Metadata only; chapter publication and update times are separate; unavailable links do not establish first publication |
-| `crawl_jobs` | 本库持久任务队列；合并可以生成后续任务，但不复制源节点的租约、完成状态或执行次数；coordinator 队列不表示节点执行进度 |
+| `crawl_chapters` | 历史章节元数据保留；2026-09-21 切换作品级范围后不再新增逐章记录 |
+| `collection_scope` | `work_date_endpoints` 表示采作品信息和有限日期端点；记录在 `crawl_meta`、新观测 meta 和状态摘要中 |
+| `crawl_jobs` | 旧起点章节待办标记 `excluded` 并保留退出事件，由 `qidian_dates` 日期端点任务接续； 本库持久任务队列；合并可以生成后续任务，但不复制源节点的租约、完成状态或执行次数；coordinator 队列不表示节点执行进度 |
 | `crawl_pages` | 分页观测证据；`unresolved` 不表示目录覆盖已完成 |
 | `crawl_merge_log` | 每次合并的来源节点、计划、来源文件路径、合并时间与新增/已知观测数；`source_queue_json`、`source_platforms_json` 保留源快照的执行状态，不代表实时状态 |
+
+新范围的 `metadata_json.publication_window` 保存首个可见章、正文起止候选与最后可见章，
+每个端点均含标题、URL 和分开的首发/更新时间。`boundary_status` 为待复核候选或未确定，
+`directory_coverage` 明确目录尚未独立核验。没有首章编号不能判为作品首章；末尾番外不等于正文。
+`main_text_start_publication_candidate`、`main_text_end_publication_candidate` 为正文起止首发候选；
+对应 `*_update_candidate` 仅表示修改时间。章节标题无法验证正文内容，不能直接构造实际写作期。
+正文起止以最新 `publication_window` 为准；日期表保留历史角色，后续证据不足不自动清空旧候选。
 
 Date roles distinguish `catalog_publication`, `platform_publication`,
 `first_chapter_publication`, `last_update`, and `completion_candidate`.

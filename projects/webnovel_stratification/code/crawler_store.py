@@ -867,6 +867,25 @@ class Store:
         finally:
             source.close()
 
+    def apply_endpoint_scope(self, platforms=None):
+        """Replace full chapter tasks with bounded date endpoints; preserve history."""
+        config = self.distribution()
+        platforms = platforms if platforms is not None else (config["owned_platforms"] if config else ["qidian", "jjwxc"])
+        changed, now = 0, _clock()
+        with self._transaction():
+            if "qidian" in platforms:
+                rows = self.conn.execute("SELECT job_key,status,lease_until,params_json,priority,due_at FROM crawl_jobs WHERE platform='qidian' AND kind='qidian_chapters' AND status IN ('pending','retry','blocked','invalid','leased','excluded')").fetchall()
+                if any(row["status"] == "leased" and (row["lease_until"] is None or row["lease_until"] > now) for row in rows):
+                    raise ValueError("chapter_worker_still_running")
+                for row in rows:
+                    if row["status"] != "excluded":
+                        self.conn.execute("UPDATE crawl_jobs SET status='excluded',token=NULL,lease_until=NULL,updated_at=? WHERE job_key=?", (now, row["job_key"]))
+                        self._event(row["job_key"], "excluded", now, "collection_scope", "replaced_by_date_endpoints")
+                        changed += 1
+                    self._enqueue("qidian", "qidian_dates", json.loads(row["params_json"]), row["priority"], row["due_at"], now)
+            self.conn.execute("INSERT OR REPLACE INTO crawl_meta(key,value) VALUES('collection_scope','work_date_endpoints')")
+        return changed
+
     @classmethod
     def read_summary(cls, path):
         """Read one committed snapshot without opening a writable Store."""
@@ -900,7 +919,8 @@ class Store:
         unresolved = conn.execute("SELECT count(DISTINCT job_key) FROM crawl_observations o WHERE job_key IS NOT NULL AND coverage IN (" + placeholders + ") AND observation_id=(SELECT observation_id FROM crawl_observations x WHERE x.job_key=o.job_key ORDER BY observed_ts DESC,recorded_at DESC,observation_id DESC LIMIT 1)", unresolved_labels).fetchone()[0]
         invalid_catalog = conn.execute("SELECT count(*) FROM crawl_jobs WHERE kind LIKE '%catalog%' AND status='invalid'").fetchone()[0]
         now = _clock()
-        return {"initialized": bool(conn.execute("SELECT 1 FROM crawl_meta WHERE key='initialized'").fetchone()), "counts": counts, "jobs": jobs,
+        scope = conn.execute("SELECT value FROM crawl_meta WHERE key='collection_scope'").fetchone()
+        return {"collection_scope": scope[0] if scope else "legacy_with_chapters", "initialized": bool(conn.execute("SELECT 1 FROM crawl_meta WHERE key='initialized'").fetchone()), "counts": counts, "jobs": jobs,
                 "distribution_plan": plan, "node_id": node, "owned_platforms": owned,
                 "owned_jobs": [group for group in jobs if group["platform"] in owned],
                 "works_by_platform": [dict(r) for r in conn.execute("SELECT platform,count(*) AS count FROM crawl_works GROUP BY platform")],

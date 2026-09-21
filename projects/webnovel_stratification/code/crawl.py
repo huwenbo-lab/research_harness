@@ -15,7 +15,7 @@ import threading
 import time
 
 from crawler_http import BudgetExhausted, Client, FetchError
-from crawler_platforms import KINDS, detail_jobs, initial_catalog_jobs, run_task
+from crawler_platforms import ACTIVE_KINDS, KINDS, detail_jobs, initial_catalog_jobs, run_task
 from crawler_store import LeaseError, Store
 from cloud_state import StateError, validate_database
 
@@ -117,7 +117,7 @@ def refresh_after(job, result):
 def worker(db, platform, request_budget, seconds, stop, only_kinds=None):
     store = Store(db)
     client = Client(platform, store, max_requests=request_budget, max_seconds=seconds)
-    kinds = only_kinds or KINDS[platform]
+    kinds = only_kinds or ACTIVE_KINDS[platform]
     position = 0
     invalid_streak = 0
     started = time.monotonic()
@@ -214,8 +214,9 @@ def run(args, stop=None, manage_signals=True):
             store = Store(args.db)
             try:
                 platforms = execution_platforms(store, args.platform, getattr(args, "node", None))
-                if args.kind and (len(platforms) != 1 or args.kind not in KINDS[platforms[0]]):
+                if args.kind and (len(platforms) != 1 or args.kind not in ACTIVE_KINDS[platforms[0]]):
                     raise ValueError("--kind requires one matching platform")
+                store.apply_endpoint_scope(platforms)
                 seed_jobs(store, args.start_year, args.end_year, include_works=False, platforms=platforms)
             finally:
                 store.close()
@@ -395,7 +396,7 @@ def main():
         command.add_argument("--db", type=Path, required=True)
         command.add_argument("--node", choices=["cloud", "local"], help="Assert this node identity; never change ownership")
         command.add_argument("--platform", choices=["auto", "both", "qidian", "jjwxc"], default="auto")
-        command.add_argument("--kind", choices=[k for kinds in KINDS.values() for k in kinds])
+        command.add_argument("--kind", choices=[k for kinds in ACTIVE_KINDS.values() for k in kinds])
         command.add_argument("--max-requests", type=int, default=50, help="Per-platform budget including robots and session pages")
         command.add_argument("--max-seconds", type=int, default=300)
         command.add_argument("--start-year", type=int, default=2005)

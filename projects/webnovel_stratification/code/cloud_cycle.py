@@ -119,6 +119,13 @@ def run_cycle(store, repo: str, db: Path, out: Path, run_id: str, attempt: int,
     if initial_pointer is not None:
         result["bootstrap_pointer"] = initial_pointer
     summary_path = out / "cloud_summary.json"
+    # Apply the current research scope before checking inherited invalid tasks.
+    # A retired chapter request must not block valid work-level acquisition.
+    state = Store.open_existing(db)
+    try:
+        state.apply_endpoint_scope()
+    finally:
+        state.close()
     restored_summary = Store.read_summary(db)
     invalid_jobs = [group for group in restored_summary["owned_jobs"] if group["status"] == "invalid"]
     if invalid_jobs:

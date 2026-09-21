@@ -1,6 +1,6 @@
 # PROJECT_CONTEXT
 
-## Current execution state (2026-09-20)
+## Current execution state (2026-09-21)
 
 采集入口为 `code/crawl.py`。已完成节点分工，持久状态位于
 `data/derived/distributed/`：`cloud.sqlite` 固定负责起点（`qidian`），
@@ -18,14 +18,19 @@
 云端 workflow 已合并 main，唯一自动调度每天台北 11:23、23:23 启动起点批次；
 旧入口均保留为手动任务。本地已安装 `com.huwenbo.webnovel.local` LaunchAgent，
 每 35 分钟启动有限晋江批次，登录后自动续采；显式暂停或实质错误需修复后恢复。
-手动 `watch` 仍可用，但不要与后台服务同时运行。代码验证已通过 142 项 crawler、
-50 项 cloud 和 15 项 local service 测试。正式启动状态见 `deployment.json`、
+手动 `watch` 仍可用，但不要与后台服务同时运行。代码验证已通过 160 项 crawler、
+51 项 cloud 和 15 项 local service 测试。正式启动状态见 `deployment.json`、
 `service/service_status.json` 和 GitHub Actions；加载了调度不等于每时每刻都有采集进程。
 真实节点试跑、合并和重复合并的最新结果，以节点 `status` 输出及
 `data/derived/distributed/` 中的 `validation.json`、`merge_summary.json`、
 `remerge_summary.json` 为准；汇总导出目标为该目录下的 `export/`。
 采集计数尚不构成最终小说样本或已验证的年份覆盖；锚点年份有效性审计与实质编码
 仍待开展。运行命令、日期语义和未解决覆盖问题见 README。
+
+研究者要求保留首章与正文结束时间以研究主要连载期，当前 `work_date_endpoints` 范围
+采作品信息及最多四个章节边界证据，不再新增全目录逐章记录。起点目录任务只提取日期端点，
+晋江同页提取；历史章节数据保留。正文边界均为待复核候选，首发和更新不能混用，
+公开连载期不能直接解释为实际写作时间。
 
 ## Working title
 

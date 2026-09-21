@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
 from crawler_http import FetchError
-from crawler_platforms import qidian_catalog, jjwxc_catalog, qidian_detail, qidian_chapters, jjwxc_detail
+from crawler_platforms import qidian_catalog, jjwxc_catalog, qidian_detail, qidian_chapters, jjwxc_detail, run_task
 
 
 class Client:
@@ -122,6 +122,15 @@ class AdapterTests(unittest.TestCase):
         self.assertIsNone(result["chapters"][0]["publication_date"])
         self.assertEqual(result["chapters"][0]["update_date"], "2020-01-01 00:00:00")
 
+    def test_qidian_endpoint_task_requests_catalog_once_without_chapter_records(self):
+        client = Client('<a href="https://m.qidian.com/chapter/123/456/">正文完结 2020-01-01 00:00:00</a>')
+        result = run_task(client, {"platform": "qidian", "kind": "qidian_dates", "params": {"work_id": "123"}})
+        self.assertEqual(client.urls, ['https://m.qidian.com/book/123/catalog/'])
+        self.assertEqual(result["chapters"], [])
+        self.assertTrue(all("update" in d["role"] for d in result["dates"]))
+        self.assertEqual(result["works"][0]["publication_window"]["main_text_end_candidate"]["chapter_id"], "456")
+        self.assertEqual(result["meta"]["collection_scope"], "work_date_endpoints")
+
     def test_jjwxc_explicit_publication_separate_from_update(self):
         body = '''<span itemprop="articleSection">作品</span><span itemprop="author">作者</span>
         <table><tr itemprop="chapter"><td>1</td><td><a href="onebook.php?novelid=321&amp;chapterid=1">第一章</a></td>
@@ -138,6 +147,27 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("first_observed_chapter_publication", roles)
         self.assertIn("last_observed_chapter_publication", roles)
         self.assertNotIn("last_chapter_publication", roles)
+
+    def test_work_only_task_retains_dates_without_serializing_chapter_rows(self):
+        body = '''<span itemprop="articleSection">作品</span><span itemprop="author">作者</span>
+        <table><tr itemprop="chapter"><td>1</td><td><a href="onebook.php?novelid=321&amp;chapterid=1">第一章</a></td>
+        <td title="章节首发时间：2010-01-01 00:00:00">2020-01-01 00:00:00</td></tr>
+        <tr itemprop="chapter"><td>2</td><td>无法核验的章节</td><td>2021-01-01 00:00:00</td></tr></table>'''
+        client = Client(body)
+        result = run_task(client, {"platform": "jjwxc", "kind": "jjwxc_detail", "params": {"work_id": "321"}})
+        self.assertEqual(result["chapters"], [])
+        self.assertEqual(len(client.urls), 1)
+        self.assertIn("first_chapter_publication", {d["role"] for d in result["dates"]})
+        self.assertEqual(result["meta"]["collection_scope"], "work_date_endpoints")
+        self.assertEqual(result["meta"]["unverified_chapter_row_count"], 1)
+        for value in ("chapter_title", "completion_candidates", "unverified_chapter_rows"):
+            self.assertNotIn(value, json.dumps(result))
+
+    def test_retired_chapter_task_makes_no_request(self):
+        client = Client("must not fetch")
+        with self.assertRaisesRegex(FetchError, "task_excluded_by_collection_scope"):
+            run_task(client, {"platform": "qidian", "kind": "qidian_chapters", "params": {"work_id": "1"}})
+        self.assertEqual(client.urls, [])
 
     def test_jjwxc_foreign_book_cannot_pass_fallback_chapter_parser(self):
         body = '''<span itemprop="articleSection">Other book</span><span itemprop="author">Other author</span>
@@ -183,6 +213,26 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(FetchError):
             jjwxc_detail(Client(body), {"work_id": "123"})
 
+    def test_jjwxc_without_chapter_links_requires_two_matching_work_widgets(self):
+        metadata = '<span itemprop="articleSection">Book</span><span itemprop="author">Author</span>'
+        click = '<div id="clickNovelid">123</div>'
+        review = '<div id="novelreview_div" data-novelid="123"></div>'
+        result = jjwxc_detail(Client(metadata + click + review), {"work_id": "123"})
+        self.assertEqual(result["works"][0]["work_id"], "123")
+        self.assertEqual(result["chapters"], [])
+        self.assertFalse(any(row["role"] == "first_publication" for row in result["dates"]))
+        for widgets in (click, review, click + review.replace('123', '999'),
+                        click + click + review, click.replace('123', '999') + review):
+            with self.subTest(widgets=widgets), self.assertRaises(FetchError):
+                jjwxc_detail(Client(metadata + widgets), {"work_id": "123"})
+        class RedirectedClient(Client):
+            def get(self, url, **kwargs):
+                response = super().get(url, **kwargs)
+                response.url = "https://www.jjwxc.net/onebook.php?novelid=999"
+                return response
+        with self.assertRaises(FetchError):
+            jjwxc_detail(RedirectedClient(metadata + click + review), {"work_id": "123"})
+
     def test_jjwxc_author_lock_notice_is_gone_in_utf8_and_gbk(self):
         body = '''<meta name="robots" content="noindex, nofollow">
           <div id="lockpage"><p><span>非常抱歉，相关内容已被作者自行锁定。</span></p>
@@ -194,6 +244,30 @@ class AdapterTests(unittest.TestCase):
                     jjwxc_detail(client, {"work_id": "100067"})
                 self.assertEqual((caught.exception.category, caught.exception.message), ("gone", "jjwxc_author_locked"))
                 self.assertEqual(client.urls, ["https://www.jjwxc.net/onebook.php?novelid=100067"])
+
+    def test_jjwxc_admin_lock_notice_requires_exact_template_and_identity(self):
+        notice = "非常抱歉，相关内容因出版、修改或者存在色情、有害、原创违规、侵权等原因而被网站管理员锁定或删除。"
+        body = '<meta name="robots" content="noindex, nofollow"><div id="lockpage"><p>' + notice + '</p></div>'
+        for encoding in ("utf-8", "gb18030"):
+            with self.subTest(encoding=encoding), self.assertRaises(FetchError) as caught:
+                jjwxc_detail(Client(body.encode(encoding)), {"work_id": "101589"})
+            self.assertEqual((caught.exception.category, caught.exception.message),
+                             ("gone", "jjwxc_admin_locked_or_deleted"))
+        for wrong in (body.replace('id="lockpage"', 'id="other"'),
+                      body.replace('noindex, nofollow', 'index, follow'),
+                      body.replace(notice, "管理员锁定状态未知，请稍后再试"),
+                      body + '<link rel="canonical" href="https://www.jjwxc.net/onebook.php?novelid=999">'):
+            with self.subTest(body=wrong), self.assertRaises(FetchError) as caught:
+                jjwxc_detail(Client(wrong), {"work_id": "101589"})
+            self.assertEqual(caught.exception.category, "invalid")
+        class RedirectedClient(Client):
+            def get(self, url, **kwargs):
+                response = super().get(url, **kwargs)
+                response.url = "https://www.jjwxc.net/onebook.php?novelid=999"
+                return response
+        with self.assertRaises(FetchError) as caught:
+            jjwxc_detail(RedirectedClient(body), {"work_id": "101589"})
+        self.assertEqual(caught.exception.message, "jjwxc_unavailable_page_identity_mismatch")
 
     def test_jjwxc_other_missing_metadata_and_lock_messages_are_not_gone(self):
         bodies = (

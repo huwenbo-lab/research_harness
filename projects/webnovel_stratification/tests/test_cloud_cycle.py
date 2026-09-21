@@ -332,6 +332,21 @@ class CloudCycleTests(unittest.TestCase):
         self.assertEqual(self.commands, [])
         self.assertEqual(len(self.remote.assets), 2)
 
+    def test_restored_chapter_failures_are_retired_before_cloud_preflight(self):
+        store = Store(self.cloud)
+        try:
+            store.enqueue("qidian", "qidian_chapters", {"work_id": "1"})
+            store.conn.execute("UPDATE crawl_jobs SET status='invalid' WHERE kind='qidian_chapters'")
+        finally:
+            store.close()
+        self.replace_remote_snapshot(self.cloud)
+        result = self.cycle(self.cycle_executor(), batches=1)
+        self.assertFalse(result["needs_attention"])
+        self.assertEqual(self.executed_batches, 1)
+        with closing(sqlite3.connect(self.root / "cycle/crawler.sqlite")) as conn:
+            self.assertEqual(conn.execute("SELECT status FROM crawl_jobs WHERE kind='qidian_chapters'").fetchone()[0], "excluded")
+            self.assertEqual(conn.execute("SELECT value FROM crawl_meta WHERE key='collection_scope'").fetchone()[0], "work_date_endpoints")
+
     def test_owned_invalid_jobs_stop_before_collection_or_publication(self):
         with closing(sqlite3.connect(self.cloud)) as conn, conn:
             conn.execute("UPDATE crawl_jobs SET status='invalid'")

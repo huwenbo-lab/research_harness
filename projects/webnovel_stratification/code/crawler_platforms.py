@@ -17,11 +17,15 @@ from collect_qidian_catalog import BASE as QD_BASE, MALE_CATEGORIES, parse as pa
 from collect_qidian_api_metadata import parse_mobile_book, parse_mobile_catalog
 from date_parser_v04 import date_value, parse_jj_detail
 from crawler_http import FetchError
+from crawler_dates import SCOPE, publication_window
 
 KINDS = {
-    "qidian": ["qidian_catalog", "qidian_detail", "qidian_chapters"],
+    "qidian": ["qidian_catalog", "qidian_detail", "qidian_dates", "qidian_chapters"],
     "jjwxc": ["jjwxc_catalog", "jjwxc_detail"],
 }
+ACTIVE_KINDS = {platform: [kind for kind in kinds if kind != "qidian_chapters"]
+                for platform, kinds in KINDS.items()}
+
 JJ_DIMENSIONS = [
     ("yc", [1, 2]), ("xx", [1, 2, 3, 5, 6]), ("isfinish", [1, 2]),
     ("sd", [1, 2, 4, 5]),
@@ -49,7 +53,7 @@ def initial_catalog_jobs(start_year=2005, end_year=2026):
 def detail_jobs(platform, work_id):
     yield task(platform, platform + "_detail", {"work_id": str(work_id)}, 100)
     if platform == "qidian":
-        yield task(platform, "qidian_chapters", {"work_id": str(work_id)}, 110)
+        yield task(platform, "qidian_dates", {"work_id": str(work_id)}, 110)
 
 
 def invalid(message):
@@ -298,7 +302,18 @@ def qidian_chapters(client, params):
     return output
 
 
-def _jjwxc_author_locked(body, soup):
+def qidian_dates(client, params):
+    # The public catalog request supplies boundary evidence; no chapter body is
+    # requested, and its displayed update dates are never publication dates.
+    parsed = qidian_chapters(client, params)
+    window, dates = publication_window(str(params["work_id"]), parsed["chapters"])
+    output = result(parsed["meta"]["source_url"], publication_window=window)
+    output["works"] = [{"work_id": str(params["work_id"]), "publication_window": window}]
+    output["dates"] = dates
+    return output
+
+
+def _jjwxc_lock_reason(body, soup):
     """Recognize the observed official lock notice, not missing metadata alone."""
     if soup.find("div", id="lockpage") is None:
         return False
@@ -320,21 +335,24 @@ def _jjwxc_author_locked(body, soup):
         notice = notice_soup.select_one("div#lockpage > p")
         text = re.sub(r"\s+", "", notice.get_text()) if notice else ""
         if re.fullmatch(r"非常抱歉[，,]相关内容已被作者自行锁定[。.!！]?", text):
-            return True
-    return False
+            return "jjwxc_author_locked"
+        if text == "非常抱歉，相关内容因出版、修改或者存在色情、有害、原创违规、侵权等原因而被网站管理员锁定或删除。":
+            return "jjwxc_admin_locked_or_deleted"
+    return None
 
 
-def jjwxc_detail(client, params):
+def jjwxc_detail(client, params, *, retain_chapters=True):
     wid = str(params["work_id"])
     url = "https://www.jjwxc.net/onebook.php?novelid=" + wid
     response = client.get(url)
     soup = BeautifulSoup(response.body, "html.parser")
-    if _jjwxc_author_locked(response.body, soup):
+    lock_reason = _jjwxc_lock_reason(response.body, soup)
+    if lock_reason:
         received = urlparse(getattr(response, "url", ""))
         if (received.scheme != "https" or received.hostname != "www.jjwxc.net"
                 or received.path != "/onebook.php" or parse_qs(received.query) != {"novelid": [wid]}):
             invalid("jjwxc_unavailable_page_identity_mismatch")
-        raise FetchError("gone", "jjwxc_author_locked")
+        raise FetchError("gone", lock_reason)
     # Public work pages contain VIP chapter references and separate purchase
     # action links. Keep the references as metadata but never request either.
     # Removing only purchase hyperlinks also prevents the legacy parser from
@@ -377,7 +395,18 @@ def jjwxc_detail(client, params):
                     or len(query["chapterid"]) != 1 or not re.fullmatch(r"[0-9]+", query["chapterid"][0])):
                 invalid("jjwxc_chapter_identity_mismatch")
             linked_identity = True
-    if not canonical_identity and not linked_identity:
+    # Some public work pages retain metadata but expose no chapter links.
+    # Require two dedicated work widgets to agree, plus the exact response URL;
+    # arbitrary recommendations or a requested URL alone cannot prove identity.
+    click_ids = [node.get_text(strip=True) for node in soup.select("div#clickNovelid")]
+    review_ids = [str(node.get("data-novelid", "")) for node in soup.select("div#novelreview_div")]
+    if any(value != wid for value in click_ids + review_ids):
+        invalid("jjwxc_widget_identity_mismatch")
+    received = urlparse(getattr(response, "url", ""))
+    widget_identity = (click_ids == [wid] and review_ids == [wid]
+                       and received.scheme == "https" and received.hostname == "www.jjwxc.net"
+                       and received.path == "/onebook.php" and parse_qs(received.query) == {"novelid": [wid]})
+    if not canonical_identity and not linked_identity and not widget_identity:
         invalid("jjwxc_work_identity_unverified")
     chapters, unverified, seen = [], [], set()
     for chapter in parsed["chapters"]:
@@ -394,10 +423,18 @@ def jjwxc_detail(client, params):
             invalid("jjwxc_chapter_identity_mismatch")
         seen.add(cid)
         chapters.append(chapter)
-    output = result(url, chapter_count_observed=len(chapters), unverified_chapter_rows=unverified,
+    output = result(url, chapter_count_observed=len(chapters),
+                    **({"unverified_chapter_rows": unverified} if retain_chapters else
+                       {"unverified_chapter_row_count": len(unverified)}),
                     catalog_completeness="not_independently_verified")
     output["works"] = [{"work_id": wid, "title": parsed["title"], "author": parsed["author"],
                          "status": parsed.get("status"), "work_url": url, "metadata_fields": parsed.get("metadata_fields")}]
+    if not retain_chapters:
+        window, dates = publication_window(wid, chapters, parsed.get("status"))
+        output["meta"]["publication_window"] = window
+        output["works"][0]["publication_window"] = window
+        output["dates"] = dates
+        return output
     for chapter in chapters:
         output["chapters"].append({**chapter, "work_id": wid,
                                    "chapter_id": chapter["chapter_id"],
@@ -414,7 +451,8 @@ def jjwxc_detail(client, params):
             if chapter.get(field):
                 output["dates"].append({"work_id": wid, "role": role, "value": chapter[field], "basis": "official_" + field})
     candidates = completion_candidates({**parsed, "chapters": chapters})
-    output["meta"]["completion_candidates"] = candidates
+    if retain_chapters:
+        output["meta"]["completion_candidates"] = candidates
     rank = {"all_text_end_marker_update": 3, "main_story_end_marker_update": 2, "ending_marker_update": 1}
     if candidates:
         best = max(candidates, key=lambda c: (rank.get(c.get("role"), 0), c.get("basis") == "explicit_chapter_publication"))
@@ -430,4 +468,11 @@ ADAPTERS = {name: globals()[name] for kinds in KINDS.values() for name in kinds}
 def run_task(client, job):
     if job["kind"] not in KINDS.get(job["platform"], []):
         invalid("task_platform_mismatch")
-    return ADAPTERS[job["kind"]](client, job["params"])
+    if job["kind"] not in ACTIVE_KINDS[job["platform"]]:
+        invalid("task_excluded_by_collection_scope")
+    if job["kind"] == "jjwxc_detail":
+        output = jjwxc_detail(client, job["params"], retain_chapters=False)
+    else:
+        output = ADAPTERS[job["kind"]](client, job["params"])
+    output["meta"]["collection_scope"] = SCOPE
+    return output

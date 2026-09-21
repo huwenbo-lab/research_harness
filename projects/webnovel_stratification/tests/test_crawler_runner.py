@@ -65,6 +65,14 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(seen, [2])
         self.assertEqual(self.store.summary()["counts"]["observations"], 2)
 
+    def test_default_worker_skips_existing_chapter_tasks(self):
+        self.store.enqueue("qidian", "qidian_chapters", {"work_id": "1"})
+        seen = []
+        with patch.object(crawl, "Client", FakeClient), patch.object(crawl, "run_task", side_effect=lambda client, job: seen.append(job["kind"]) or {}):
+            crawl.worker(self.db, "qidian", 3, 1200, threading.Event())
+        self.assertEqual(seen, ["qidian_catalog"])
+        self.assertEqual(self.store.conn.execute("SELECT attempts FROM crawl_jobs WHERE kind='qidian_chapters'").fetchone()[0], 0)
+
     def test_transient_failure_stays_retryable(self):
         report = self.worker(FetchError("retry", "connection_closed"))
         self.assertEqual(report["errors"], {"retry": 1})
@@ -140,7 +148,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(urls, ["https://m.qidian.com/category/catid10/"])
         self.assertFalse(result["meta"]["api_requested"])
         self.assertEqual(result["meta"]["coverage"], "public_html_partial")
-        self.assertEqual({job["kind"] for job in result["followups"]}, {"qidian_detail", "qidian_chapters"})
+        self.assertEqual({job["kind"] for job in result["followups"]}, {"qidian_detail", "qidian_dates"})
         job = self.store.claim("qidian")
         self.store.finish(job, result)
         self.assertEqual(self.store.summary()["unresolved_catalog"], 1)

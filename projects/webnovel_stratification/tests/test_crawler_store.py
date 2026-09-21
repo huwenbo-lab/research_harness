@@ -55,6 +55,31 @@ class StoreTests(unittest.TestCase):
         finally:
             source.close()
 
+    def test_work_scope_preserves_history_and_excludes_only_chapter_queue(self):
+        chapter = self.job("1", kind="qidian_chapters")
+        self.store.finish(chapter, self.result(works=[{"work_id": "1"}],
+            chapters=[{"work_id": "1", "chapter_id": "1", "chapter_title": "old"}]), next_due=500, now=101)
+        self.store.enqueue("qidian", "qidian_detail", {"work_id": "1"})
+        self.store.enqueue("qidian", "qidian_chapters", {"work_id": "2"})
+        self.store.conn.execute("UPDATE crawl_jobs SET status='invalid',error_message='old failure' WHERE params_json=? AND kind='qidian_chapters'", ('{"work_id":"2"}',))
+        old_chapters = [tuple(r) for r in self.store.conn.execute("SELECT * FROM crawl_chapters")]
+        old_obs = [tuple(r) for r in self.store.conn.execute("SELECT * FROM crawl_observations")]
+        self.assertEqual(self.store.apply_endpoint_scope(), 2)
+        self.assertEqual(self.store.apply_endpoint_scope(), 0)
+        self.assertEqual([tuple(r) for r in self.store.conn.execute("SELECT * FROM crawl_chapters")], old_chapters)
+        self.assertEqual([tuple(r) for r in self.store.conn.execute("SELECT * FROM crawl_observations")], old_obs)
+        self.assertIsNone(self.store.claim("qidian", "qidian_chapters"))
+        self.assertIsNotNone(self.store.claim("qidian", "qidian_detail"))
+        self.assertEqual(self.store.summary()["collection_scope"], "work_date_endpoints")
+        self.assertEqual(self.store.conn.execute("SELECT count(*) FROM crawl_events WHERE event='excluded'").fetchone()[0], 2)
+
+    def test_work_scope_cannot_retire_live_chapter_lease(self):
+        self.store.enqueue("qidian", "qidian_chapters", {"work_id": "1"})
+        self.store.claim("qidian", "qidian_chapters")
+        with self.assertRaisesRegex(ValueError, "chapter_worker_still_running"):
+            self.store.apply_endpoint_scope()
+        self.assertIsNone(self.store.conn.execute("SELECT value FROM crawl_meta WHERE key='collection_scope'").fetchone())
+
     def test_distribution_ownership_tags_and_summary(self):
         self.assertIsNone(self.store.distribution())
         before_split = self.job("1")
