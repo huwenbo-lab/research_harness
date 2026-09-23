@@ -67,6 +67,27 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(FetchError):
             jjwxc_catalog(Client(jj(year=2020)), {"year": 2010, "page": 1})
 
+    def test_official_blank_catalog_title_preserves_id_and_followup(self):
+        result = jjwxc_catalog(Client(jj().replace('>作品</a>', '> </a>')),
+                               {"year": 2010, "page": 1})
+        self.assertEqual(result["works"][0]["work_id"], "321")
+        self.assertIsNone(result["works"][0]["title"])
+        self.assertTrue(result["works"][0]["title_missing_from_catalog"])
+        self.assertTrue(any(task["kind"] == "jjwxc_detail" for task in result["followups"]))
+
+    def test_blank_detail_title_needs_explicit_blank_field_and_matching_controls(self):
+        body = '''<span itemprop="articleSection"> </span><span itemprop="author">Author</span>
+        <div id="clickNovelid">123</div><div id="novelreview_div" data-novelid="123"></div>
+        <span class="uninterested-author" data-novelid="123" data-novelname=" " data-authorname="Author"></span>'''
+        result = jjwxc_detail(Client(body), {"work_id": "123"}, retain_chapters=False)
+        self.assertIsNone(result["works"][0]["title"])
+        self.assertTrue(result["works"][0]["title_missing_from_detail"])
+        for bad in (body.replace('<span itemprop="articleSection"> </span>', ''),
+                    body.replace('data-novelid="123"', 'data-novelid="999"'),
+                    body.replace('data-novelname=" "', 'data-novelname="Other"')):
+            with self.subTest(body=bad), self.assertRaises(FetchError):
+                jjwxc_detail(Client(bad), {"work_id": "123"})
+
     def test_jjwxc_pagination_is_explicit(self):
         result = jjwxc_catalog(Client(jj()), {"year": 2010, "page": 1, "filters": {}, "depth": 0})
         next_page = [j for j in result["followups"] if j["kind"] == "jjwxc_catalog"]

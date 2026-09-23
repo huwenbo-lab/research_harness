@@ -65,7 +65,7 @@ def result(url, **meta):
             "meta": {"source_url": url, "observed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), **meta}}
 
 
-def check_rows(rows, raw_count=None):
+def check_rows(rows, raw_count=None, *, allow_missing_title=False):
     ids = [str(row.get("work_id", "")) for row in rows]
     if any(not re.fullmatch(r"[0-9]+", wid) for wid in ids):
         invalid("invalid_work_id")
@@ -73,7 +73,7 @@ def check_rows(rows, raw_count=None):
         invalid("duplicate_id_inside_page")
     if raw_count is not None and raw_count != len(rows):
         invalid("unparsed_catalog_rows")
-    if any(not row.get("title") for row in rows):
+    if not allow_missing_title and any(not row.get("title") for row in rows):
         invalid("catalog_title_missing")
     return ids
 
@@ -168,7 +168,13 @@ def jjwxc_catalog(client, params):
         invalid("jjwxc_unexpected_empty_page")
     if not rows and not re.search(r"(?:没有|暂无|未找到).{0,12}(?:作品|文章|记录)|共\s*0\s*页", BeautifulSoup(response.body, "html.parser").get_text(" ", strip=True)):
         invalid("jjwxc_empty_not_explicit")
-    ids = check_rows(rows)
+    # Official catalog anchors can contain whitespace-only titles. Preserve the
+    # verified ID and explicit missingness instead of losing the whole page.
+    for row in rows:
+        row["title_missing_from_catalog"] = not bool(row.get("title"))
+        if row["title_missing_from_catalog"]:
+            row["title"] = None
+    ids = check_rows(rows, allow_missing_title=True)
     partition = {k: v for k, v in params.items() if k != "page"}
     output = result(url, page_ids=ids, partition_key=canonical(partition), page=page,
                     reported_pages=total, coverage="leaf", requested_year=year,
@@ -364,7 +370,9 @@ def jjwxc_detail(client, params, *, retain_chapters=True):
         if (target.hostname, target.path) == ("my.jjwxc.net", "/backend/buynovel.php"):
             node.unwrap()
     parsed = parse_jj_detail(soup.encode("utf-8"), wid, url)
-    if not parsed.get("title") or not parsed.get("author"):
+    title_node = soup.select_one('[itemprop="articleSection"]')
+    blank_title = title_node is not None and not title_node.get_text(strip=True)
+    if (not parsed.get("title") and not blank_title) or not parsed.get("author"):
         invalid("jjwxc_work_metadata_missing")
     chapter_references = {("www.jjwxc.net", "/onebook.php"), ("my.jjwxc.net", "/onebook_vip.php")}
     canonical_identity = False
@@ -406,7 +414,7 @@ def jjwxc_detail(client, params, *, retain_chapters=True):
     controls = soup.select("span.uninterested-author[data-novelid]")
     control_identity = bool(controls) and all(
         node.get("data-novelid") == wid
-        and re.sub(r"\s+", " ", str(node.get("data-novelname", ""))).strip() == parsed["title"]
+        and re.sub(r"\s+", " ", str(node.get("data-novelname", ""))).strip() == (parsed["title"] or "")
         and re.sub(r"\s+", " ", str(node.get("data-authorname", ""))).strip() == parsed["author"]
         for node in controls)
     # All-locked works may omit the review widget. Their dedicated work control
@@ -416,6 +424,8 @@ def jjwxc_detail(client, params, *, retain_chapters=True):
                        and received.path == "/onebook.php" and parse_qs(received.query) == {"novelid": [wid]})
     if not canonical_identity and not linked_identity and not widget_identity:
         invalid("jjwxc_work_identity_unverified")
+    if blank_title and not (widget_identity and control_identity):
+        invalid("jjwxc_blank_title_identity_unverified")
     chapters, unverified, seen = [], [], set()
     for chapter in parsed["chapters"]:
         if not chapter.get("chapter_url"):
@@ -435,7 +445,7 @@ def jjwxc_detail(client, params, *, retain_chapters=True):
                     **({"unverified_chapter_rows": unverified} if retain_chapters else
                        {"unverified_chapter_row_count": len(unverified)}),
                     catalog_completeness="not_independently_verified")
-    output["works"] = [{"work_id": wid, "title": parsed["title"], "author": parsed["author"],
+    output["works"] = [{"work_id": wid, "title": parsed["title"] or None, "title_missing_from_detail": blank_title, "author": parsed["author"],
                          "status": parsed.get("status"), "work_url": url, "metadata_fields": parsed.get("metadata_fields")}]
     if not retain_chapters:
         window, dates = publication_window(wid, chapters, parsed.get("status"))

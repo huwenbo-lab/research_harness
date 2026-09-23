@@ -11,6 +11,7 @@
 | Table / field | Current meaning |
 |---|---|
 | `crawl_works` | One current row per `(platform, work_id)`; field provenance and extra metadata remain in JSON |
+| `title_missing_from_catalog`, `title_missing_from_detail` | 官方页面明确未提供标题时为 true；作品 ID 和其他已核验字段保留，不编造名称，也不覆盖旧的已知标题 |
 | `sample_class` | Preliminary genre-based label, not the final inclusion rule; missing genre stays unresolved |
 | `crawl_observations` | 不可变解析结果、来源 URL、观测时间和覆盖状态；合并保留源行的 `observation_id`、`recorded_at`、`observed_at`、`observed_ts`、`time_basis`、`source_kind` 和 `result_json`；历史导入的未知观测时间不补造 |
 | `result_json.meta.collector_node`, `result_json.meta.collection_plan` | 分工后新采集观测的来源节点（`cloud` / `local`）及计划 ID；当前计划为 `2f852998f23d432eb45a6c5606f06cfc` |
