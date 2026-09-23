@@ -233,6 +233,21 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(FetchError):
             jjwxc_detail(RedirectedClient(metadata + click + review), {"work_id": "123"})
 
+    def test_locked_work_without_reviews_uses_matching_identity_control(self):
+        metadata = '<span itemprop="articleSection">Book</span><span itemprop="author">Author</span>'
+        click = '<div id="clickNovelid">123</div>'
+        control = '<span class="uninterested-author" data-novelid="123" data-novelname="Book" data-authorname="Author"></span>'
+        result = jjwxc_detail(Client(metadata + click + control), {"work_id": "123"}, retain_chapters=False)
+        self.assertEqual(result["works"][0]["title"], "Book")
+        self.assertEqual(result["dates"], [])
+        for bad in (control.replace('123', '999'), control.replace('Book', 'Other'),
+                    control.replace('Author', 'Other'), '',
+                    control + '<div id="novelreview_div" data-novelid="999"></div>'):
+            with self.subTest(control=bad), self.assertRaises(FetchError):
+                jjwxc_detail(Client(metadata + click + bad), {"work_id": "123"})
+        with self.assertRaises(FetchError):
+            jjwxc_detail(Client(metadata + control), {"work_id": "123"})
+
     def test_jjwxc_author_lock_notice_is_gone_in_utf8_and_gbk(self):
         body = '''<meta name="robots" content="noindex, nofollow">
           <div id="lockpage"><p><span>非常抱歉，相关内容已被作者自行锁定。</span></p>

@@ -1,6 +1,6 @@
 # PROJECT_CONTEXT
 
-## Current execution state (2026-09-21)
+## Current execution state (2026-09-24)
 
 采集入口为 `code/crawl.py`。已完成节点分工，持久状态位于
 `data/derived/distributed/`：`cloud.sqlite` 固定负责起点（`qidian`），
@@ -18,8 +18,8 @@
 云端 workflow 已合并 main，唯一自动调度每天台北 11:23、23:23 启动起点批次；
 旧入口均保留为手动任务。本地已安装 `com.huwenbo.webnovel.local` LaunchAgent，
 每 35 分钟启动有限晋江批次，登录后自动续采；显式暂停或实质错误需修复后恢复。
-手动 `watch` 仍可用，但不要与后台服务同时运行。代码验证已通过 160 项 crawler、
-51 项 cloud 和 15 项 local service 测试。正式启动状态见 `deployment.json`、
+手动 `watch` 仍可用，但不要与后台服务同时运行。代码验证已通过 161 项 crawler、
+55 项 cloud 和 15 项 local service 测试。正式启动状态见 `deployment.json`、
 `service/service_status.json` 和 GitHub Actions；加载了调度不等于每时每刻都有采集进程。
 真实节点试跑、合并和重复合并的最新结果，以节点 `status` 输出及
 `data/derived/distributed/` 中的 `validation.json`、`merge_summary.json`、

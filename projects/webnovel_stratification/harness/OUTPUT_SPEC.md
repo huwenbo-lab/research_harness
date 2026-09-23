@@ -1,6 +1,6 @@
 # OUTPUT_SPEC
 
-## Current acquisition outputs (2026-09-21)
+## Current acquisition outputs (2026-09-24)
 
 当前分工产物位于 `data/derived/distributed/`：
 
@@ -23,7 +23,7 @@
 当前范围为 `work_date_endpoints`；仅保留有限章节边界证据和作品日期，历史逐章记录继续保留。
 后台服务的配置、逐批回执、暂停原因及日志保存在 `distributed/service/`；
 正式部署、运行记录及当次合并导出状态保存在 `distributed/deployment.json`。
-当前代码验证为 160 项 crawler、51 项 cloud 和 15 项 local service 测试通过；研究样本和年份覆盖
+当前代码验证为 161 项 crawler、55 项 cloud 和 15 项 local service 测试通过；研究样本和年份覆盖
 仍需完成下述实质性试点审计。
 
 ## Pilot outputs

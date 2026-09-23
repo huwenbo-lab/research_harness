@@ -403,7 +403,15 @@ def jjwxc_detail(client, params, *, retain_chapters=True):
     if any(value != wid for value in click_ids + review_ids):
         invalid("jjwxc_widget_identity_mismatch")
     received = urlparse(getattr(response, "url", ""))
-    widget_identity = (click_ids == [wid] and review_ids == [wid]
+    controls = soup.select("span.uninterested-author[data-novelid]")
+    control_identity = bool(controls) and all(
+        node.get("data-novelid") == wid
+        and re.sub(r"\s+", " ", str(node.get("data-novelname", ""))).strip() == parsed["title"]
+        and re.sub(r"\s+", " ", str(node.get("data-authorname", ""))).strip() == parsed["author"]
+        for node in controls)
+    # All-locked works may omit the review widget. Their dedicated work control
+    # carries ID, title and author, independently of the click counter.
+    widget_identity = (click_ids == [wid] and (review_ids == [wid] or (not review_ids and control_identity))
                        and received.scheme == "https" and received.hostname == "www.jjwxc.net"
                        and received.path == "/onebook.php" and parse_qs(received.query) == {"novelid": [wid]})
     if not canonical_identity and not linked_identity and not widget_identity:

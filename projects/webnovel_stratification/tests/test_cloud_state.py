@@ -378,6 +378,70 @@ class GitHubCommandTests(unittest.TestCase):
             with self.subTest(result=result), self.assertRaises(StateError):
                 GitHubReleases(REPO, runner=lambda *args, **kwargs: result).inventory()
 
+    def test_read_retries_are_bounded_and_do_not_expose_stderr(self):
+        calls, sleeps = [], []
+        def runner(args, **kwargs):
+            calls.append((args, kwargs))
+            return subprocess.CompletedProcess(args, 1, "", "HTTP 503 secret-response")
+        store = GitHubReleases(REPO, runner=runner, sleeper=sleeps.append)
+        with self.assertRaisesRegex(StateError, "attempts 3") as caught:
+            store.command("api", "repos/owner/repo", retry_read=True)
+        self.assertNotIn("secret-response", str(caught.exception))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [5, 15])
+        self.assertTrue(all(kwargs["timeout"] == 120 for _, kwargs in calls))
+
+    def test_download_retry_replaces_only_its_partial_staging_file(self):
+        calls, sleeps = [], []
+        def runner(args, **kwargs):
+            calls.append(args)
+            target = Path(args[args.index("--dir") + 1]) / POINTER_ASSET
+            target.write_text("partial" if len(calls) == 1 else "complete")
+            return subprocess.CompletedProcess(args, int(len(calls) == 1), "", "unexpected EOF")
+        store = GitHubReleases(REPO, runner=runner, sleeper=sleeps.append)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = store.download(POINTER_TAG, POINTER_ASSET, Path(tmp))
+            self.assertEqual(path.read_text(), "complete")
+            self.assertEqual(list(Path(tmp).iterdir()), [path])
+            with self.assertRaisesRegex(StateError, "already exists"):
+                store.download(POINTER_TAG, POINTER_ASSET, Path(tmp))
+            self.assertEqual(path.read_text(), "complete")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("--clobber", calls[0])
+        self.assertEqual(sleeps, [5])
+
+    def test_read_timeout_retries_but_failed_upload_does_not(self):
+        calls, sleeps = [], []
+        def runner(args, **kwargs):
+            calls.append(args)
+            if len(calls) == 1:
+                raise subprocess.TimeoutExpired(args, 120)
+            return subprocess.CompletedProcess(args, 0, "ok", "")
+        store = GitHubReleases(REPO, runner=runner, sleeper=sleeps.append)
+        self.assertEqual(store.command("api", "test", retry_read=True), "ok")
+        self.assertEqual(sleeps, [5])
+        calls.clear()
+        def failed(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 1, "", "HTTP 503")
+        store.runner = failed
+        with self.assertRaises(StateError):
+            store.upload(POINTER_TAG, Path(POINTER_ASSET), replace=True)
+        self.assertEqual(len(calls), 1)
+
+    def test_failed_download_leaves_no_final_or_partial_file(self):
+        calls = []
+        def runner(args, **kwargs):
+            calls.append(args)
+            (Path(args[args.index("--dir") + 1]) / POINTER_ASSET).write_text("partial")
+            return subprocess.CompletedProcess(args, 1, "", "HTTP 503")
+        store = GitHubReleases(REPO, runner=runner, sleeper=lambda _: None)
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(StateError):
+                store.download(POINTER_TAG, POINTER_ASSET, Path(tmp))
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+        self.assertEqual(len(calls), 3)
+
     def test_only_pointer_upload_uses_clobber(self):
         calls = []
         def runner(args, **kwargs):

@@ -9,11 +9,13 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+import os
 import re
 import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -122,30 +124,55 @@ def validate_database(path: Path) -> None:
 
 
 class GitHubReleases:
-    def __init__(self, repo: str, runner=None):
+    def __init__(self, repo: str, runner=None, sleeper=None):
         self.repo = validate_repository(repo)
         self.runner = runner or subprocess.run
+        self.sleeper = sleeper or time.sleep
 
-    def command(self, *args: str) -> str:
-        result = self.runner(["gh", *args], capture_output=True, text=True)
-        if result.returncode:
-            # gh can include remote response content in stderr. Keep logs bounded
-            # and avoid echoing tokens or untrusted response bodies.
-            raise StateError(f"GitHub command failed ({' '.join(args[:2])}, exit {result.returncode})")
-        return result.stdout
+    def command(self, *args: str, retry_read=False) -> str:
+        attempts = 3 if retry_read else 1
+        for attempt in range(attempts):
+            try:
+                options = {"capture_output": True, "text": True}
+                if retry_read:
+                    options["timeout"] = 120
+                result = self.runner(["gh", *args], **options)
+                if result.returncode == 0:
+                    return result.stdout
+                error = str(result.stderr or "").lower()
+                permanent = bool(re.search(r"http (?:401|403|404)|authorization failed|authentication failed|bad credentials|not logged|not found|no assets match|permission denied", error))
+                retryable = not permanent or "rate limit" in error
+                reason = f"exit {result.returncode}"
+            except subprocess.TimeoutExpired:
+                retryable, reason = True, "timeout"
+            if not retry_read or not retryable or attempt == attempts - 1:
+                # Do not print remote bodies or credentials from gh stderr.
+                raise StateError(f"GitHub command failed ({' '.join(args[:2])}, {reason}, attempts {attempt + 1})")
+            self.sleeper((5, 15)[attempt])
+        raise AssertionError("unreachable")
 
     def download(self, tag: str, asset: str, directory: Path) -> Path:
-        self.command("release", "download", tag, "--repo", self.repo,
-                     "--pattern", asset, "--dir", str(directory))
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", asset) or ".." in asset:
+            raise StateError("Asset must be a single filename")
+        directory.mkdir(parents=True, exist_ok=True)
         path = directory / asset
-        if not path.is_file() or path.is_symlink():
-            raise StateError("GitHub did not return the requested asset")
+        if path.exists() or path.is_symlink():
+            raise StateError("Download destination already exists")
+        # Retry into a private staging directory: gh may leave a partial file.
+        # --clobber applies only to that staging file, never retained data.
+        with tempfile.TemporaryDirectory(prefix=".download-", dir=directory) as tmp:
+            self.command("release", "download", tag, "--repo", self.repo,
+                         "--pattern", asset, "--dir", tmp, "--clobber", retry_read=True)
+            staged = Path(tmp) / asset
+            if not staged.is_file() or staged.is_symlink():
+                raise StateError("GitHub did not return the requested asset")
+            os.link(staged, path)  # Exclusive publication; cannot overwrite a destination.
         return path
 
     def ensure_monthly_release(self, tag: str, target: str) -> None:
         # A network/authentication error must not be mistaken for a missing release.
         tags = self.command("api", "--paginate", f"repos/{self.repo}/releases",
-                            "--jq", ".[].tag_name").splitlines()
+                            "--jq", ".[].tag_name", retry_read=True).splitlines()
         if tag not in tags:
             self.command("release", "create", tag, "--repo", self.repo,
                          "--target", target, "--latest=false", "--title", tag,
@@ -158,7 +185,7 @@ class GitHubReleases:
         """Read every relevant release and asset page; errors never mean absence."""
         def pages(endpoint):
             try:
-                value = json.loads(self.command("api", "--paginate", "--slurp", endpoint))
+                value = json.loads(self.command("api", "--paginate", "--slurp", endpoint, retry_read=True))
             except ValueError as exc:
                 raise StateError("GitHub inventory returned invalid JSON") from exc
             if not isinstance(value, list) or not all(isinstance(page, list) for page in value):
