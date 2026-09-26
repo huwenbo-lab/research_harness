@@ -17,6 +17,7 @@ import time
 from crawler_http import BudgetExhausted, Client, FetchError
 from crawler_platforms import ACTIVE_KINDS, KINDS, detail_jobs, initial_catalog_jobs, run_task
 from crawler_store import LeaseError, Store
+from crawler_health import health, isolated_error, missing_attempts, VALIDATION_RECHECKS
 from cloud_state import StateError, validate_database
 
 
@@ -123,6 +124,10 @@ def worker(db, platform, request_budget, seconds, stop, only_kinds=None):
     started = time.monotonic()
     report = {"platform": platform, "succeeded": 0, "errors": {}, "exit_reason": "no_due_tasks"}
     try:
+        if health(store.conn, [platform])["halt_required"]:
+            report.update(exit_reason="validation_halted", requests=0,
+                          needs_attention=True, halt_required=True)
+            return report
         while not stop.is_set():
             if client.requests >= request_budget or time.monotonic() - started >= seconds:
                 report["exit_reason"] = "budget_exhausted"
@@ -150,11 +155,20 @@ def worker(db, platform, request_budget, seconds, stop, only_kinds=None):
                     report["exit_reason"] = "budget_exhausted"
                     break
                 except FetchError as error:
-                    store.fail(job, error.category, str(error), retry_after=error.retry_after)
-                    report["errors"][error.category] = report["errors"].get(error.category, 0) + 1
-                    invalid_streak = invalid_streak + 1 if error.category == "invalid" else 0
+                    category = error.category
+                    if category == "invalid" and isolated_error(job["kind"], str(error)):
+                        # A transient incomplete work page gets two paced rechecks.
+                        # A third failure remains invalid and is never auto-claimed.
+                        if missing_attempts(store.conn, job) + 1 < VALIDATION_RECHECKS:
+                            category = "retry"
+                    store.fail(job, category, str(error), retry_after=error.retry_after)
+                    report["errors"][category] = report["errors"].get(category, 0) + 1
+                    invalid_streak = invalid_streak + 1 if category == "invalid" else 0
                     if error.category == "blocked":
                         report["exit_reason"] = "platform_cooldown"
+                        break
+                    if isolated_error(job["kind"], str(error)) and health(store.conn, [platform])["validation_circuits"]:
+                        report["exit_reason"] = "repeated_validation_failure"
                         break
                 except ValueError as error:
                     # Invalid output must not advance the page cursor.
@@ -180,6 +194,10 @@ def worker(db, platform, request_budget, seconds, stop, only_kinds=None):
             report["exit_reason"] = "interrupted"
         report["requests"] = client.requests
         report["needs_attention"] = bool(set(report["errors"]) & {"invalid", "blocked", "internal"}) or report["exit_reason"] == "platform_cooldown"
+        state_health = health(store.conn, [platform])
+        report["halt_required"] = state_health["halt_required"] or report["exit_reason"] in {
+            "repeated_validation_failure", "internal_error"}
+        report["needs_attention"] |= state_health["needs_attention"]
         return report
     finally:
         client.close()
@@ -226,8 +244,11 @@ def run(args, stop=None, manage_signals=True):
                 reports = [future.result() for future in futures]
             store = Store(args.db)
             summary = store.summary()
+            state_health = health(store.conn, platforms)
             store.close()
-            summary.update(workers=reports, needs_attention=any(r["needs_attention"] for r in reports) or any(row["status"] == "invalid" and row["platform"] in platforms for row in summary["jobs"]),
+            summary.update(**state_health)
+            summary.update(workers=reports, needs_attention=state_health["needs_attention"] or any(r["needs_attention"] for r in reports),
+                           halt_required=state_health["halt_required"] or any(r["halt_required"] for r in reports),
                            observed_at=datetime.now(timezone.utc).isoformat(timespec="seconds"))
             if args.summary:
                 write_json(args.summary, summary)
@@ -251,7 +272,7 @@ def watch(args):
                 code = run(args, stop=stop, manage_signals=False)
                 completed += 1
                 last = json.loads(args.summary.read_text(encoding="utf-8"))
-                if code or any(row["status"] == "invalid" for row in last.get("owned_jobs", last["jobs"])):
+                if code or last.get("halt_required", any(row["status"] == "invalid" for row in last.get("owned_jobs", last["jobs"]))):
                     reason = "repair_required"
                     break
                 if stop.is_set():
@@ -286,10 +307,15 @@ def retry_invalid(args):
         try:
             execution_platforms(store, platform, args.node)
             with store._transaction():
-                rows = store.conn.execute("SELECT job_key,params_json FROM crawl_jobs WHERE platform=? AND kind=? AND status='invalid'", (platform, args.kind)).fetchall()
+                rows = store.conn.execute("SELECT job_key,params_json,status,error_message FROM crawl_jobs WHERE platform=? AND kind=? AND status IN ('invalid','retry')", (platform, args.kind)).fetchall()
                 now, changed = time.time(), 0
                 for row in rows:
                     if args.work_id and json.loads(row["params_json"]).get("work_id") != args.work_id:
+                        continue
+                    # A systemic missing-field halt can precede quarantine. Let
+                    # explicit repairs acknowledge those retries, never transport
+                    # retries or access-control cooldowns.
+                    if row["status"] == "retry" and not isolated_error(args.kind, row["error_message"]):
                         continue
                     # Explicit repairs rejoin the initial queue at their original
                     # creation position, ahead of later untouched peers.
@@ -411,7 +437,7 @@ def main():
     merger.add_argument("--db", type=Path, required=True)
     merger.add_argument("--source", type=Path, required=True, action="append")
     merger.add_argument("--summary", type=Path)
-    repair = commands.add_parser("retry-invalid", help="Explicitly requeue invalid results after fixing their cause")
+    repair = commands.add_parser("retry-invalid", help="After repair, requeue invalid results or missing-metadata retries")
     repair.add_argument("--db", type=Path, required=True)
     repair.add_argument("--node", choices=["cloud", "local"])
     repair.add_argument("--kind", required=True, choices=[k for kinds in KINDS.values() for k in kinds])

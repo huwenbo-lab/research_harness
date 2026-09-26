@@ -233,7 +233,7 @@ class RunnerTests(unittest.TestCase):
     def test_auto_platform_uses_only_assigned_node_and_rejects_foreign_kind(self):
         self.distributed(node="local")
         self.assertEqual(crawl.execution_platforms(self.store, "auto", "local"), ["jjwxc"])
-        with patch.object(crawl, "worker", return_value={"needs_attention": False, "exit_reason": "no_due_tasks"}) as worker, redirect_stdout(io.StringIO()):
+        with patch.object(crawl, "worker", return_value={"needs_attention": False, "halt_required": False, "exit_reason": "no_due_tasks"}) as worker, redirect_stdout(io.StringIO()):
             self.assertEqual(crawl.run(self.args(node="local"), manage_signals=False), 0)
             self.assertEqual(worker.call_count, 1)
             self.assertEqual(worker.call_args.args[1], "jjwxc")
@@ -305,6 +305,19 @@ class RunnerTests(unittest.TestCase):
                     self.assertEqual(crawl.watch(args), expected_code)
                     self.assertEqual(run.call_count, 1)
                 self.assertEqual(json.loads(args.summary.read_text())["watch"]["status"], expected_status)
+
+    def test_watch_continues_past_quarantine_but_stops_for_circuit(self):
+        owned = {"platform": "jjwxc", "status": "invalid", "count": 1}
+        for halt, expected_batches, expected_code in ((False, 2, 0), (True, 1, 1)):
+            with self.subTest(halt=halt):
+                args = self.args(batches=2, interval=0)
+                def one_batch(received, **_kwargs):
+                    crawl.write_json(received.summary, self.watch_summary(
+                        owned_jobs=[owned], halt_required=halt, needs_attention=True))
+                    return 0
+                with patch.object(crawl.signal, "signal", return_value=signal.SIG_DFL), patch.object(crawl, "run", side_effect=one_batch) as run:
+                    self.assertEqual(crawl.watch(args), expected_code)
+                    self.assertEqual(run.call_count, expected_batches)
 
     def test_retry_invalid_only_requeues_specified_kind_work_and_assigned_platform(self):
         self.distributed(node="cloud")

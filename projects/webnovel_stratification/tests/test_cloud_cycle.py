@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
 from cloud_state import POINTER_ASSET, POINTER_TAG, StateError, publish, restore, write_json
+import cloud_cycle
 from cloud_cycle import BOOTSTRAP_TAG, run_cycle
 from crawl import audit_database
 from crawler_store import Store
@@ -249,6 +250,30 @@ class CloudCycleTests(unittest.TestCase):
     def replace_remote_snapshot(self, database):
         self.remote.assets[(self.remote.pointer["tag"], self.remote.pointer["asset"])] = gzip.compress(database.read_bytes())
 
+    def quarantine_remote_works(self, count):
+        store = Store(self.cloud)
+        try:
+            for work_id in range(10, 10 + count):
+                store.enqueue("qidian", "qidian_detail", {"work_id": str(work_id)})
+                store.fail(store.claim("qidian", kind="qidian_detail"), "invalid", "qidian_work_metadata_missing")
+        finally:
+            store.close()
+        self.replace_remote_snapshot(self.cloud)
+
+    def reported_health_executor(self, report, *, batch=1, return_code=0):
+        execute = self.cycle_executor()
+
+        def override(argv):
+            code = execute(argv)
+            if argv[2] == "run" and self.executed_batches == batch:
+                summary = Path(argv[argv.index("--summary") + 1])
+                value = json.loads(summary.read_text())
+                value.update(report)
+                write_json(summary, value)
+                return return_code
+            return code
+        return override
+
     def test_explicit_bootstrap_audits_distinct_predecessor_then_runs_three_batches(self):
         inputs = self.stage_bootstrap()
         result = self.cycle(self.cycle_executor(), **inputs)
@@ -374,6 +399,92 @@ class CloudCycleTests(unittest.TestCase):
         result = self.cycle(self.cycle_executor())
         self.assertFalse(result["needs_attention"])
         self.assertEqual(self.executed_batches, 3)
+
+    def test_quarantined_work_survives_publish_and_does_not_block_remaining_batches(self):
+        self.quarantine_remote_works(1)
+        result = self.cycle(self.reported_health_executor(
+            {"needs_attention": True, "halt_required": False, "quarantined_jobs": 1}))
+        self.assertEqual(self.executed_batches, 3)
+        self.assertTrue(result["needs_attention"])
+        self.assertFalse(result["halt_required"])
+        self.assertEqual(result["quarantined_jobs"], 1)
+        with closing(sqlite3.connect(self.root / "cycle/crawler.sqlite")) as conn:
+            self.assertEqual(conn.execute("SELECT count(*) FROM crawl_jobs WHERE status='invalid'").fetchone()[0], 1)
+        # The latest durable receipt must retain the warning after a later batch
+        # has no newly encountered invalid response.
+        pointer = result["completed_batches"][-1]["pointer"]
+        saved = json.loads(self.remote.assets[(pointer["tag"], pointer["asset"].replace(".sqlite.gz", ".summary.json"))])
+        self.assertTrue(saved["needs_attention"])
+        self.assertFalse(saved["halt_required"])
+        self.assertEqual(saved["quarantined_jobs"], 1)
+
+    def test_repeated_missing_metadata_halts_restored_node_without_publication(self):
+        self.quarantine_remote_works(3)
+        before = dict(self.remote.assets)
+        result = self.cycle(self.cycle_executor())
+        self.assertTrue(result["halt_required"])
+        self.assertTrue(result["needs_attention"])
+        self.assertTrue(result["validation_circuits"])
+        self.assertEqual(result["completed_batches"], [])
+        self.assertEqual([operation for operation, _ in self.commands], ["audit"])
+        self.assertEqual(self.remote.assets, before)
+
+    def test_soft_warning_does_not_stop_cycle_or_disappear_from_final_receipt(self):
+        result = self.cycle(self.reported_health_executor({"needs_attention": True, "halt_required": False}))
+        self.assertEqual(self.executed_batches, 3)
+        self.assertTrue(result["needs_attention"])
+        self.assertFalse(result["halt_required"])
+        self.assertTrue(result["completed_batches"][0]["needs_attention"])
+        self.assertFalse(result["completed_batches"][-1]["needs_attention"])
+
+    def test_legacy_attention_summary_still_stops_even_with_zero_exit_code(self):
+        result = self.cycle(self.reported_health_executor({"needs_attention": True}))
+        self.assertEqual(self.executed_batches, 1)
+        self.assertTrue(result["halt_required"])
+        self.assertTrue(result["needs_attention"])
+
+    def test_explicit_circuit_halt_is_published_before_stopping(self):
+        result = self.cycle(self.reported_health_executor({"needs_attention": True, "halt_required": True}))
+        self.assertEqual(self.executed_batches, 1)
+        self.assertTrue(result["halt_required"])
+        self.assertEqual(self.restart_from_remote(), (2, 2))
+
+    def test_fatal_worker_conditions_override_nonhalting_flag(self):
+        for number, worker in enumerate((
+                {"exit_reason": "budget_exhausted", "errors": {"internal": 1}},
+                {"exit_reason": "budget_exhausted", "errors": {"blocked": 1}},
+                {"exit_reason": "interrupted", "errors": {}},
+                {"exit_reason": "platform_cooldown", "errors": {}},
+                {"exit_reason": "repeated_validation_failure", "errors": {}},
+                {"exit_reason": "validation_halted", "errors": {}},
+                {"exit_reason": "internal_error", "errors": {}})):
+            with self.subTest(worker=worker):
+                result = run_cycle(self.remote, REPO, self.root / f"fatal-{number}/crawler.sqlite",
+                                   self.root / f"fatal-output-{number}", str(201 + number), 1, "main",
+                                   run_command=self.reported_health_executor(
+                                       {"needs_attention": False, "halt_required": False, "workers": [worker]}))
+                self.assertEqual(self.executed_batches, 1)
+                self.assertTrue(result["halt_required"])
+                self.assertTrue(result["needs_attention"])
+
+    def test_malformed_worker_or_halting_field_stops_safely(self):
+        for number, report in enumerate(({"workers": []}, {"workers": [None]},
+                                         {"halt_required": "false"})):
+            with self.subTest(report=report):
+                result = run_cycle(self.remote, REPO, self.root / f"malformed-{number}/crawler.sqlite",
+                                   self.root / f"malformed-output-{number}", str(301 + number), 1, "main",
+                                   run_command=self.reported_health_executor(report))
+                self.assertEqual(self.executed_batches, 1)
+                self.assertTrue(result["halt_required"])
+                self.assertTrue(result["needs_attention"])
+
+    def test_cli_warns_without_failure_status_but_halts_exit_nonzero(self):
+        argv = ["cloud_cycle.py", "--repo", REPO, "--run-id", "200", "--attempt", "1", "--target", "main"]
+        for halt, code in ((False, 0), (True, 1)):
+            with self.subTest(halt=halt), patch.object(sys, "argv", argv), \
+                    patch.object(cloud_cycle, "run_cycle", return_value={"needs_attention": True, "halt_required": halt}), \
+                    patch("builtins.print"):
+                self.assertEqual(cloud_cycle.main(), code)
 
     def test_three_batches_preserve_true_run_identity_and_advance_each_previous(self):
         result = self.cycle(self.cycle_executor())

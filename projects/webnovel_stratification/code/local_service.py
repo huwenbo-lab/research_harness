@@ -23,6 +23,7 @@ import uuid
 
 from cloud_state import validate_database
 from crawl import check_output_file, write_json
+from crawler_health import read_health
 from crawler_store import Store
 
 
@@ -51,9 +52,11 @@ def validate_local(db):
     summary = Store.read_summary(db)
     if summary.get("node_id") != "local" or summary.get("owned_platforms") != ["jjwxc"]:
         raise ServiceError("service_requires_local_jjwxc_node")
-    invalid = sum(row["count"] for row in summary.get("owned_jobs", []) if row["status"] == "invalid")
-    if invalid:
-        raise ServiceError("invalid_jobs_require_repair:" + str(invalid))
+    health = read_health(db, ["jjwxc"])
+    if health["halt_required"]:
+        raise ServiceError("invalid_jobs_require_repair:" + str(health["blocking_invalid_jobs"])
+                           + ":" + ",".join(health["validation_circuits"]))
+    summary.update(health)
     return summary
 
 
@@ -228,15 +231,26 @@ def tick(directory):
                 batch = load_json(summary_path)
                 if (batch.get("node_id") != "local" or batch.get("owned_platforms") != ["jjwxc"]
                         or not isinstance(batch.get("workers"), list) or len(batch["workers"]) != 1
+                        or not isinstance(batch["workers"][0], dict)
                         or batch["workers"][0].get("platform") != "jjwxc"
-                        or not isinstance(batch.get("owned_jobs"), list)):
+                        or not isinstance(batch.get("owned_jobs"), list)
+                        or any(not isinstance(row, dict) or "status" not in row for row in batch["owned_jobs"])
+                        or not isinstance(batch["workers"][0].get("errors", {}), dict)
+                        or ("halt_required" in batch and not isinstance(batch["halt_required"], bool))):
                     raise ServiceError("invalid_summary")
                 invalid = any(row["status"] == "invalid" for row in batch["owned_jobs"])
                 errors = batch["workers"][0].get("errors", {})
-                if invalid or any(errors.get(key, 0) for key in ("invalid", "internal")):
-                    marker_data = pause(directory, "invalid_jobs" if invalid or errors.get("invalid") else "collector_internal_error")
+                # New summaries distinguish isolated records from a validation
+                # halt. Legacy summaries retain the conservative pause policy.
+                halt_required = batch.get("halt_required", invalid or bool(errors.get("invalid")))
+                health = read_health(Path(config["db"]), ["jjwxc"])
+                if halt_required or health["halt_required"] or errors.get("internal"):
+                    marker_data = pause(directory, "collector_internal_error" if errors.get("internal") else "invalid_jobs")
                     return receipt(directory, "paused", pause=marker_data, collector_exit=code, summary=str(summary_path))
                 return receipt(directory, "ready", collector_exit=code, summary=str(summary_path),
+                               needs_attention=bool(batch.get("needs_attention") or health["needs_attention"] or invalid or errors.get("invalid")),
+                               quarantined_jobs=health["quarantined_jobs"],
+                               halt_required=False,
                                last_exit_reason=batch["workers"][0].get("exit_reason"), completed_at=utc())
             except Exception as error:
                 if interrupted and not marker.exists():
@@ -310,14 +324,16 @@ def resume(directory, kickstart=True):
     directory = Path(directory).resolve()
     with service_lock(directory):
         config = load_config(directory)
-        validate_local(Path(config["db"]))
+        summary = validate_local(Path(config["db"]))
         marker = directory / "pause.json"
         if marker.exists():
             previous = load_json(marker)
             if previous.get("schema_version") != 1 or not isinstance(previous.get("reason"), str):
                 raise ServiceError("invalid_pause_marker")
             marker.unlink()
-        result = receipt(directory, "ready", resumed_at=utc())
+        result = receipt(directory, "ready", resumed_at=utc(),
+                         needs_attention=summary["needs_attention"],
+                         quarantined_jobs=summary["quarantined_jobs"], halt_required=False)
     if kickstart:
         try:
             result["kickstart_requested"] = launchctl(directory, "kickstart").returncode == 0

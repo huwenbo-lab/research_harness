@@ -547,17 +547,61 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(row["failure_count"], 0)
         self.assertEqual(row["status"], "pending")
         now = 102
-        for attempt in range(self.store.MAX_FAILURES):
+        for attempt in range(20):
             job = self.store.claim("qidian", now=now)
             status = self.store.fail(job, "retry", "remote disconnected", now=now + 1)
             row = self.store.conn.execute("SELECT * FROM crawl_jobs").fetchone()
-            if attempt < self.store.MAX_FAILURES - 1:
-                self.assertEqual(status, "retry")
-                self.assertIsNone(self.store.claim("qidian", now=row["due_at"] - 1))
-                now = row["due_at"]
-            else:
-                self.assertEqual(status, "invalid")
-        self.assertIsNone(self.store.claim("qidian", now=now + 1000000))
+            self.assertEqual(status, "retry")
+            self.assertEqual(row["error_category"], "retry")
+            self.assertEqual(row["failure_count"], attempt + 1)
+            delay = row["due_at"] - (now + 1)
+            self.assertLessEqual(delay, self.store.MAX_BACKOFF)
+            if attempt < 4:
+                self.assertEqual(delay, (30, 60, 120, 240)[attempt])
+            if attempt + 1 >= self.store.RETRY_SLOWDOWN_AFTER:
+                self.assertGreaterEqual(delay, 3600)
+            self.assertIsNone(self.store.claim("qidian", now=row["due_at"] - 1))
+            now = row["due_at"]
+        self.assertEqual(delay, self.store.MAX_BACKOFF)
+        job = self.store.claim("qidian", now=now)
+        self.assertIsNotNone(job)
+        self.store.finish(job, self.result(works=[{"work_id": "1", "title": "recovered"}]), next_due=now + 1000, now=now + 1)
+        row = self.store.conn.execute("SELECT * FROM crawl_jobs").fetchone()
+        self.assertEqual((row["status"], row["failure_count"]), ("pending", 0))
+        self.assertIsNone(row["error_category"])
+        self.assertIsNone(row["error_message"])
+        now = row["due_at"]
+        job = self.store.claim("qidian", now=now)
+        self.store.fail(job, "retry", "network_error", now=now + 1)
+        row = self.store.conn.execute("SELECT * FROM crawl_jobs").fetchone()
+        self.assertEqual(row["failure_count"], 1)
+        self.assertEqual(row["due_at"] - (now + 1), 30)
+
+    def test_retry_handles_large_failure_count_and_honors_longer_server_delay(self):
+        job = self.job("1")
+        self.store.conn.execute("UPDATE crawl_jobs SET failure_count=1000000")
+        self.assertEqual(self.store.fail(job, "retry", "network_error", now=101), "retry")
+        row = self.store.conn.execute("SELECT * FROM crawl_jobs").fetchone()
+        self.assertEqual(row["failure_count"], 1000001)
+        self.assertEqual(row["due_at"] - 101, self.store.MAX_BACKOFF)
+        now = row["due_at"]
+        job = self.store.claim("qidian", now=now)
+        server_delay = self.store.MAX_BACKOFF * 2
+        self.assertEqual(self.store.fail(job, "retry", "http_server_error", retry_after=server_delay, now=now + 1), "retry")
+        row = self.store.conn.execute("SELECT * FROM crawl_jobs").fetchone()
+        self.assertEqual(row["due_at"], now + 1 + server_delay)
+        self.assertIsNone(self.store.claim("qidian", now=row["due_at"] - 1))
+        self.assertIsNotNone(self.store.claim("qidian", now=row["due_at"]))
+
+    def test_legacy_invalid_retry_is_not_silently_migrated_or_claimed(self):
+        job = self.job("1")
+        self.store.fail(job, "invalid", "network_error", now=101)
+        self.store.conn.execute("UPDATE crawl_jobs SET error_category='retry',failure_count=5")
+        before = dict(self.store.conn.execute("SELECT * FROM crawl_jobs").fetchone())
+        self.store.close()
+        self.store = Store(self.path)
+        self.assertIsNone(self.store.claim("qidian", now=1000000))
+        self.assertEqual(dict(self.store.conn.execute("SELECT * FROM crawl_jobs").fetchone()), before)
 
     def test_blocked_gone_invalid_categories_and_persistent_cooldown(self):
         job = self.job("block")

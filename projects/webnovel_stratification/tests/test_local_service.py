@@ -39,10 +39,15 @@ class ServiceTests(unittest.TestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    def batch(self, errors=None, status="done", exit_reason="budget_exhausted"):
+    def batch(self, errors=None, status="done", exit_reason="budget_exhausted", **health):
         return {"node_id": "local", "owned_platforms": ["jjwxc"],
                 "owned_jobs": [{"platform": "jjwxc", "kind": "jjwxc_detail", "status": status, "count": 1}],
-                "workers": [{"platform": "jjwxc", "errors": errors or {}, "exit_reason": exit_reason}]}
+                "workers": [{"platform": "jjwxc", "errors": errors or {}, "exit_reason": exit_reason}],
+                **health}
+
+    def quarantine(self, work_id):
+        self.store.enqueue("jjwxc", "jjwxc_detail", {"work_id": str(work_id)})
+        self.store.fail(self.store.claim("jjwxc", kind="jjwxc_detail"), "invalid", "jjwxc_work_metadata_missing")
 
     @contextmanager
     def process(self, batch=None, code=0, missing=False, malformed=False, callback=None, timeout=False):
@@ -154,6 +159,70 @@ class ServiceTests(unittest.TestCase):
             service.tick(self.directory)
             self.assertEqual(spawn.call_count, 1)
 
+    def test_one_quarantined_work_stays_visible_without_blocking_resume_or_next_tick(self):
+        self.quarantine(2)
+        service.pause(self.directory, "invalid_jobs")
+        result = service.resume(self.directory, kickstart=False)
+        self.assertTrue(result["needs_attention"])
+        self.assertEqual(result["quarantined_jobs"], 1)
+        self.assertFalse(result["halt_required"])
+        with self.process(batch=self.batch(errors={"invalid": 1}, status="invalid",
+                                          needs_attention=True, halt_required=False, quarantined_jobs=1)) as (_processes, spawn):
+            for _ in range(2):
+                result = service.tick(self.directory)
+                self.assertEqual(result["state"], "ready")
+                self.assertTrue(result["needs_attention"])
+                self.assertEqual(result["quarantined_jobs"], 1)
+            self.assertEqual(spawn.call_count, 2)
+        self.assertEqual(self.store.conn.execute("SELECT count(*) FROM crawl_jobs WHERE status='invalid'").fetchone()[0], 1)
+        self.assertFalse((self.directory / "pause.json").exists())
+
+    def test_repeated_missing_metadata_halts_preflight_and_refuses_resume(self):
+        for work_id in (2, 3, 4):
+            self.quarantine(work_id)
+        with patch.object(service.subprocess, "Popen") as popen:
+            result = service.tick(self.directory)
+            popen.assert_not_called()
+        self.assertEqual(result["pause"]["reason"], "preflight_failed")
+        self.assertIn("jjwxc", result["pause"]["detail"])
+        with self.assertRaisesRegex(service.ServiceError, "invalid_jobs_require_repair"):
+            service.resume(self.directory, kickstart=False)
+
+    def test_explicit_halt_and_internal_error_each_pause(self):
+        for number, batch in enumerate((
+                self.batch(errors={"invalid": 3}, status="invalid", needs_attention=True, halt_required=True),
+                self.batch(errors={"internal": 1}, needs_attention=True, halt_required=False))):
+            with self.subTest(batch=batch):
+                directory = self.root / f"halt-{number}"
+                service.prepare(self.db, directory)
+                with self.process(batch=batch):
+                    result = service.tick(directory)
+                self.assertEqual(result["state"], "paused")
+                self.assertEqual(result["pause"]["reason"], "collector_internal_error" if number else "invalid_jobs")
+
+    def test_new_database_circuit_overrides_inaccurate_nonhalting_summary(self):
+        def fail_three(_registered):
+            for work_id in (2, 3, 4):
+                self.quarantine(work_id)
+        with self.process(batch=self.batch(halt_required=False), callback=fail_three):
+            result = service.tick(self.directory)
+        self.assertEqual(result["state"], "paused")
+        self.assertEqual(result["pause"]["reason"], "invalid_jobs")
+
+    def test_blocked_batch_enters_cooldown_without_permanent_pause(self):
+        def block(_registered):
+            self.store.block_platform("jjwxc", "server challenge", 86400)
+        batch = self.batch(errors={"blocked": 1}, status="blocked", exit_reason="platform_cooldown",
+                           needs_attention=True, halt_required=False)
+        with self.process(batch=batch, callback=block):
+            result = service.tick(self.directory)
+        self.assertEqual(result["state"], "ready")
+        self.assertTrue(result["needs_attention"])
+        with patch.object(service.subprocess, "Popen") as popen:
+            self.assertEqual(service.tick(self.directory)["state"], "cooldown")
+            popen.assert_not_called()
+        self.assertFalse((self.directory / "pause.json").exists())
+
     def test_cooldown_defers_without_pausing_or_launching(self):
         self.store.block_platform("jjwxc", "server challenge", 86400)
         with patch.object(service.subprocess, "Popen") as popen:
@@ -166,7 +235,9 @@ class ServiceTests(unittest.TestCase):
     def test_fatal_nonzero_missing_malformed_and_wrong_node_summaries_pause(self):
         cases = [({"code": 1}, "collector_exit_nonzero"), ({"missing": True}, "missing_summary"),
                  ({"malformed": True}, "fatal_wrapper_error"),
-                 ({"batch": {**self.batch(), "node_id": "cloud"}}, "invalid_summary")]
+                 ({"batch": {**self.batch(), "node_id": "cloud"}}, "invalid_summary"),
+                 ({"batch": self.batch(halt_required="false")}, "invalid_summary"),
+                 ({"batch": {**self.batch(), "workers": [None]}}, "invalid_summary")]
         for number, (options, reason) in enumerate(cases):
             with self.subTest(reason=reason):
                 directory = self.root / ("failure-" + str(number))

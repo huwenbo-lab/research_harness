@@ -15,6 +15,7 @@ import zlib
 from cloud_state import (GitHubReleases, StateError, bootstrap, publish, read_json,
                          require_uninitialized, restore, validate_database,
                          validate_repository, write_json)
+from crawler_health import read_health
 from crawler_store import Store
 
 
@@ -115,7 +116,7 @@ def run_cycle(store, repo: str, db: Path, out: Path, run_id: str, attempt: int,
     if read_json(restored_audit).get("passed") is not True:
         raise StateError("Restored cloud-node audit did not pass")
     result = {"node_id": "cloud", "run_id": run_id, "attempt": attempt,
-              "completed_batches": [], "needs_attention": False}
+              "completed_batches": [], "needs_attention": False, "halt_required": False}
     if initial_pointer is not None:
         result["bootstrap_pointer"] = initial_pointer
     summary_path = out / "cloud_summary.json"
@@ -128,7 +129,8 @@ def run_cycle(store, repo: str, db: Path, out: Path, run_id: str, attempt: int,
         state.close()
     restored_summary = Store.read_summary(db)
     invalid_jobs = [group for group in restored_summary["owned_jobs"] if group["status"] == "invalid"]
-    if invalid_jobs:
+    result.update(read_health(db, restored_summary["owned_platforms"]))
+    if result["halt_required"]:
         result.update(needs_attention=True, exit_reason="repair_required", invalid_jobs=invalid_jobs)
         atomic_json(summary_path, result)
         return result
@@ -149,11 +151,24 @@ def run_cycle(store, repo: str, db: Path, out: Path, run_id: str, attempt: int,
             try:
                 run_report = read_json(run_summary)
             except StateError:
-                run_report = {"needs_attention": True, "exit_reason": "missing_or_invalid_run_summary"}
+                run_report = {"needs_attention": True, "halt_required": True,
+                              "exit_reason": "missing_or_invalid_run_summary"}
             workers = run_report.get("workers", [])
+            invalid_summary = (not isinstance(workers, list) or not workers
+                               or any(not isinstance(worker, dict) or not isinstance(worker.get("errors", {}), dict)
+                                      for worker in workers)
+                               or ("halt_required" in run_report and not isinstance(run_report["halt_required"], bool)))
             interrupted = any(worker.get("exit_reason") == "interrupted"
                               for worker in workers if isinstance(worker, dict)) if isinstance(workers, list) else False
-            needs_attention = return_code != 0 or bool(run_report.get("needs_attention")) or interrupted
+            worker_failure = any(worker.get("exit_reason") in {"platform_cooldown", "repeated_validation_failure",
+                                                               "validation_halted", "internal_error"}
+                                 or any(worker.get("errors", {}).get(key) for key in ("internal", "blocked"))
+                                 for worker in workers) if not invalid_summary else True
+            halt_required = (return_code != 0 or interrupted or worker_failure or invalid_summary
+                             or bool(run_report.get("halt_required", run_report.get("needs_attention"))))
+            health = read_health(db, restored_summary["owned_platforms"])
+            halt_required = halt_required or health["halt_required"]
+            needs_attention = halt_required or bool(run_report.get("needs_attention")) or health["needs_attention"]
             export = directory / "export"
             if execute("export", "--db", db, "--out", export) != 0:
                 raise StateError(f"Batch {batch} export failed; cycle stopped before publication")
@@ -165,7 +180,7 @@ def run_cycle(store, repo: str, db: Path, out: Path, run_id: str, attempt: int,
             cloud_summary = directory / "cloud_summary.json"
             report = {"node_id": "cloud", "run_id": run_id, "attempt": attempt,
                       "batch": batch, "run": run_report, "export": read_json(export / "summary.json"),
-                      "needs_attention": needs_attention}
+                      **health, "needs_attention": needs_attention, "halt_required": halt_required}
             atomic_json(cloud_summary, report)
             pointer = publish(store, repo, snapshot, cloud_summary, audit, receipt,
                               run_id, attempt, target, batch=batch)
@@ -175,17 +190,20 @@ def run_cycle(store, repo: str, db: Path, out: Path, run_id: str, attempt: int,
                                   "pointer": pointer, "database": str(db.resolve())})
             atomic_copy(snapshot, previous)
             result["completed_batches"].append({"batch": batch, "pointer": pointer,
-                                                 "needs_attention": needs_attention})
-            result["needs_attention"] = needs_attention
+                                                 "needs_attention": needs_attention,
+                                                 "halt_required": halt_required})
+            result.update({key: value for key, value in health.items() if key != "needs_attention"})
+            result["needs_attention"] = result["needs_attention"] or needs_attention
+            result["halt_required"] = halt_required
             atomic_json(summary_path, result)
-            if needs_attention:
+            if halt_required:
                 break
             if workers and all(isinstance(worker, dict) and worker.get("exit_reason") == "no_due_tasks"
                                and not worker.get("errors")
                                for worker in workers):
                 break
     except (StateError, OSError) as error:
-        result.update(needs_attention=True, failed_batch=batch, error=str(error))
+        result.update(needs_attention=True, halt_required=True, failed_batch=batch, error=str(error))
         atomic_json(summary_path, result)
         raise
     return result
@@ -214,7 +232,7 @@ def main() -> int:
                            bootstrap_source_asset=args.bootstrap_source_asset,
                            bootstrap_previous_asset=args.bootstrap_previous_asset)
         print(json.dumps(result, ensure_ascii=False))
-        return 1 if result["needs_attention"] else 0
+        return 1 if result["halt_required"] else 0
     except (StateError, OSError) as exc:
         parser.exit(1, f"cloud cycle stopped: {exc}\n")
 

@@ -189,7 +189,7 @@ CREATE TABLE IF NOT EXISTS crawl_conflicts(
 
 
 class Store:
-    MAX_FAILURES = 5
+    RETRY_SLOWDOWN_AFTER = 5
     MAX_BACKOFF = 86400
 
     def __init__(self, path):
@@ -347,9 +347,12 @@ class Store:
             delay = max(0, float(retry_after))
             status = category
             if category == "retry":
-                delay = max(delay, min(self.MAX_BACKOFF, 30 * 2 ** min(count - 1, 12)))
-                if count >= self.MAX_FAILURES:
-                    status = "invalid"
+                backoff = min(self.MAX_BACKOFF, 30 * 2 ** min(count - 1, 12))
+                if count >= self.RETRY_SLOWDOWN_AFTER:
+                    backoff = max(backoff, 3600)
+                # A persistent transport failure is still retryable when the
+                # remote service recovers. Respect a longer server Retry-After.
+                delay = max(delay, backoff)
             elif category == "blocked":
                 delay = max(delay, 3600)
                 self._block_platform(row["platform"], message or category, delay, now)
