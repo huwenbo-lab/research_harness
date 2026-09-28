@@ -229,6 +229,67 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(len(result["meta"]["unverified_chapter_rows"]), 1)
         self.assertEqual(result["meta"]["unverified_chapter_rows"][0]["chapter_id"], "")
 
+    def test_jjwxc_children_layout_uses_verified_links_and_publication_endpoints(self):
+        body = '''<span itemprop="articleSection">Book</span><span itemprop="author">Author</span>
+          <div class="novelmeta_item_div"><span>文章进度：</span><span itemprop="updataStatus">完结</span></div>
+          <div id="chapterlist_div">
+            <a itemprop="chapter" class="chapterlist-chapter"
+               href="http://www.jjwxc.net/onebook.php?novelid=123&amp;chapterid=1">
+              <div class="chapterid">1</div><span itemprop="headline">First</span>
+              <div class="chaptermeta"><span title="章节首发时间：2025-12-31 22:10:00">
+                <span class="chaptermeta-item">更新时间：2026-05-06 16:56:16</span></span></div>
+            </a>
+            <a itemprop="chapter newestChapter" class="chapterlist-chapter"
+               rel="http://my.jjwxc.net/onebook_vip.php?novelid=123&amp;chapterid=2">
+              <div class="chapterid">2</div><span itemprop="headline">Last [VIP]</span>
+              <div class="chaptermeta"><span title="章节首发时间：2026-05-08 18:42:00">
+                <span class="chaptermeta-item">更新时间：2026-05-10 09:00:00</span></span></div>
+            </a>
+          </div>'''
+        client = Client(body)
+        result = jjwxc_detail(client, {"work_id": "123"}, retain_chapters=False)
+        self.assertEqual(client.urls, ["https://www.jjwxc.net/onebook.php?novelid=123"])
+        self.assertEqual(result["chapters"], [])
+        window = result["works"][0]["publication_window"]
+        self.assertEqual(window["chapter_count_observed"], 2)
+        self.assertEqual(window["first_visible_chapter"]["publication_date"], "2025-12-31 22:10:00")
+        self.assertEqual(window["last_visible_chapter"]["publication_date"], "2026-05-08 18:42:00")
+        self.assertEqual(window["last_visible_chapter"]["update_date"], "2026-05-10 09:00:00")
+        self.assertEqual(window["end_basis"], "completed_status_last_non_auxiliary")
+        roles = {row["role"]: row["value"] for row in result["dates"]}
+        self.assertEqual(roles["first_chapter_publication"], "2025-12-31 22:10:00")
+        self.assertEqual(roles["last_observed_chapter_publication"], "2026-05-08 18:42:00")
+        self.assertEqual(roles["last_observed_chapter_update"], "2026-05-10 09:00:00")
+        for bad in (
+            body.replace("novelid=123&amp;chapterid=2", "novelid=999&amp;chapterid=2"),
+            body.replace("my.jjwxc.net/onebook_vip.php", "example.invalid/onebook_vip.php"),
+            body.replace('<div class="chapterid">2</div>', '<div class="chapterid">1</div>'),
+        ):
+            with self.subTest(bad=bad), self.assertRaises(FetchError):
+                jjwxc_detail(Client(bad), {"work_id": "123"}, retain_chapters=False)
+
+        class RedirectedClient(Client):
+            def get(self, url, **kwargs):
+                response = super().get(url, **kwargs)
+                response.url = "https://www.jjwxc.net/onebook.php?novelid=999"
+                return response
+        with self.assertRaises(FetchError):
+            jjwxc_detail(RedirectedClient(body), {"work_id": "123"}, retain_chapters=False)
+
+    def test_saved_jjwxc_children_page_preserves_first_and_last_publication(self):
+        path = Path(__file__).resolve().parents[1] / "data/raw/crawler_diagnostics_20260928/jjwxc_10418464.html"
+        if not path.exists():
+            self.skipTest("Optional saved children's-page diagnostic unavailable")
+        client = Client(path.read_bytes())
+        result = jjwxc_detail(client, {"work_id": "10418464"}, retain_chapters=False)
+        window = result["works"][0]["publication_window"]
+        self.assertEqual(window["chapter_count_observed"], 12)
+        self.assertEqual(window["first_visible_chapter"]["publication_date"], "2025-12-31 22:10:00")
+        self.assertEqual(window["last_visible_chapter"]["publication_date"], "2026-05-08 18:42:00")
+        self.assertEqual(window["end_basis"], "completed_status_last_non_auxiliary")
+        self.assertEqual(result["chapters"], [])
+        self.assertEqual(client.urls, ["https://www.jjwxc.net/onebook.php?novelid=10418464"])
+
     def test_jjwxc_metadata_without_identity_evidence_is_rejected(self):
         body = '<span itemprop="articleSection">Book</span><span itemprop="author">Author</span>'
         with self.assertRaises(FetchError):

@@ -383,6 +383,7 @@ def jjwxc_detail(client, params, *, retain_chapters=True):
             if query["novelid"] != [wid]:
                 invalid("jjwxc_canonical_identity_mismatch")
             canonical_identity = True
+    received = urlparse(getattr(response, "url", ""))
     # The old parser can retain an itemprop=chapter row with no usable link.
     # Inspect explicit links first so a mismatching book is not hidden by that
     # fallback. Chapter URLs are metadata only and are never requested.
@@ -403,6 +404,35 @@ def jjwxc_detail(client, params, *, retain_chapters=True):
                     or len(query["chapterid"]) != 1 or not re.fullmatch(r"[0-9]+", query["chapterid"][0])):
                 invalid("jjwxc_chapter_identity_mismatch")
             linked_identity = True
+    # The children's-books layout uses direct chapter anchors instead of table
+    # rows. Only links inside its dedicated chapter list can establish identity.
+    children = soup.select('div#chapterlist_div > a[itemprop~="chapter"]')
+    if children:
+        if (len(soup.select("div#chapterlist_div")) != 1 or received.scheme != "https"
+                or received.hostname != "www.jjwxc.net" or received.path != "/onebook.php"
+                or parse_qs(received.query) != {"novelid": [wid]}):
+            invalid("jjwxc_children_page_identity_mismatch")
+        numbers = set()
+        for node in children:
+            number = node.select_one("div.chapterid")
+            ordinal = number.get_text(strip=True) if number else ""
+            if not ordinal.isdigit() or ordinal in numbers:
+                invalid("jjwxc_children_chapter_number_invalid")
+            numbers.add(ordinal)
+            rel = node.get("rel")
+            raw = node.get("href") or (" ".join(rel) if isinstance(rel, list) else rel) or ""
+            if not raw:
+                continue
+            target = urlparse(urljoin(url, raw))
+            query = parse_qs(target.query)
+            if (target.scheme not in {"http", "https"} or (target.hostname, target.path) not in chapter_references
+                    or target.username or target.password or query.get("novelid") != [wid]
+                    or len(query.get("chapterid", [])) != 1
+                    or not re.fullmatch(r"[0-9]+", query["chapterid"][0])):
+                invalid("jjwxc_chapter_identity_mismatch")
+            linked_identity = True
+        if len(parsed["chapters"]) != len(children):
+            invalid("jjwxc_children_chapter_rows_unparsed")
     # Some public work pages retain metadata but expose no chapter links.
     # Require two dedicated work widgets to agree, plus the exact response URL;
     # arbitrary recommendations or a requested URL alone cannot prove identity.
@@ -410,7 +440,6 @@ def jjwxc_detail(client, params, *, retain_chapters=True):
     review_ids = [str(node.get("data-novelid", "")) for node in soup.select("div#novelreview_div")]
     if any(value != wid for value in click_ids + review_ids):
         invalid("jjwxc_widget_identity_mismatch")
-    received = urlparse(getattr(response, "url", ""))
     controls = soup.select("span.uninterested-author[data-novelid]")
     control_identity = bool(controls) and all(
         node.get("data-novelid") == wid

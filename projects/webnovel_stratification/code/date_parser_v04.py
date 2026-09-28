@@ -29,6 +29,56 @@ def end_role(title):
     if re.search(r'大结局|完结章',s) or re.fullmatch(r'(?:\d+[ .、]*)?完结[!！。\s]*(?:\[VIP\])?',s):return 'ending_marker_update'
     return None
 
+def _labelled_date(raw, label):
+    # Require the date immediately after its label; an update elsewhere in the
+    # same tooltip must not fill a missing publication date.
+    match=re.search(re.escape(label)+r'[ \t]*[：:][ \t]*'+DATE_RE.pattern, str(raw or ''))
+    return date_value(match.group()) if match else None
+
+def _parse_jj_chapter_cards(soup,work_id,url):
+    """Children-fiction directory metadata; chapter URLs are never fetched."""
+    chapters=[];seen=set()
+    for card in soup.select('#chapterlist_div > a[itemprop~="chapter"]'):
+        number=card.select_one('.chapterid')
+        ordinal=text(number.get_text()) if number else ''
+        if not ordinal.isdigit() or ordinal in seen:continue
+        headline=card.select_one('[itemprop~="headline"]')
+        ch_title=text(headline.get_text(' ',strip=True)) if headline else None
+        rel=card.get('rel');rel=' '.join(rel) if isinstance(rel,list) else rel
+        cid='';u=None
+        for href in (card.get('href'),rel):
+            if not href:continue
+            candidate=urljoin(url,href);q=parse_qs(urlparse(candidate).query)
+            ids=q.get('chapterid',[])
+            if q.get('novelid')==[work_id] and len(ids)==1 and ids[0].isdigit():
+                cid=ids[0];u=candidate;break
+        meta=card.select_one('.chaptermeta')
+        published=None;draft=None;updated=None;raw=None;tooltip=[]
+        if meta:
+            for el in [meta]+meta.find_all(title=True):
+                tip=el.get('title','')
+                if '章节首发时间' in tip or '章节存稿时间' in tip:
+                    tooltip.append(tip)
+                    published=published or _labelled_date(tip,'章节首发时间')
+                    draft=draft or _labelled_date(tip,'章节存稿时间')
+            for el in meta.select('.chaptermeta-item'):
+                visible=text(el.get_text(' ',strip=True))
+                if visible.startswith('更新时间'):
+                    updated=_labelled_date(visible,'更新时间')
+                    raw=visible if updated else None
+                    break
+        wc=card.select_one('[itemprop~="wordCount"]')
+        word_count=re.sub(r'^字数\s*[：:]\s*','',text(wc.get_text())) if wc else None
+        seen.add(ordinal)
+        chapters.append(dict(chapter_id=cid,chapter_number_raw=ordinal,chapter_title=ch_title,
+            chapter_url=u,word_count_raw=word_count,
+            publish_time_as_supplied=published,draft_time_as_supplied=draft,
+            publication_evidence_raw='\n'.join(tooltip) or None,
+            update_time_as_supplied=updated,date_raw=raw,is_vip_as_supplied=int('[VIP]' in card.get_text()),
+            date_semantics='official_explicit_chapter_publication_and_update' if published else 'official_chapter_list_update_not_first_publication',
+            end_role=end_role(ch_title)))
+    return chapters
+
 def parse_jj_detail(body:bytes,work_id:str,url:str):
     soup=BeautifulSoup(body,'html.parser')
     title_node=soup.select_one('[itemprop="articleSection"]')
@@ -50,6 +100,15 @@ def parse_jj_detail(body:bytes,work_id:str,url:str):
     status=None
     for s in chunks:
         if s.startswith('文章进度'):status=s.split('：',1)[-1].split(':',1)[-1].strip()
+    if not status:
+        for node in soup.select('.novelmeta_item_div'):
+            s=text(node.get_text(' ',strip=True))
+            if not s.startswith('文章进度'):continue
+            status_node=node.select_one('[itemprop~="updataStatus"]')
+            if status_node:
+                status=text(status_node.get_text(' ',strip=True)) or None
+                if s not in chunks:chunks.append(s)
+                break
     chapters=[];seen=set()
     for tr in soup.find_all('tr'):
         cells=tr.find_all('td',recursive=False)
@@ -92,6 +151,7 @@ def parse_jj_detail(body:bytes,work_id:str,url:str):
             update_time_as_supplied=updated,date_raw=raw,is_vip_as_supplied=int('[VIP]' in tr.get_text()),
             date_semantics='official_explicit_chapter_publication_and_update' if published else 'official_chapter_list_update_not_first_publication',
             end_role=end_role(ch_title)))
+    if not chapters:chapters=_parse_jj_chapter_cards(soup,work_id,url)
     chapters.sort(key=lambda c:int(c['chapter_number_raw']))
     return dict(work_id=work_id,title=title,author=author,status=status,metadata_fields=fields,date_meta=date_meta,
                 metadata_lines=chunks,chapters=chapters,encoding=soup.original_encoding)
