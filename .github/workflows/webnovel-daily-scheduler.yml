@@ -7,7 +7,8 @@ name: Durable webnovel metadata collection
 # next batch. Assets retain the true run/attempt and add an independent batch ID.
 on:
   schedule:
-    - cron: '23 3,15 * * *'
+    # Three eight-hour cycles stay below the monthly release's 1,000-asset cap.
+    - cron: '23 3,11,19 * * *'
   workflow_dispatch:
     inputs:
       bootstrap_source_asset:
