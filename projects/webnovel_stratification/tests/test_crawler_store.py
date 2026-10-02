@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "code"))
@@ -592,6 +593,78 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(row["due_at"], now + 1 + server_delay)
         self.assertIsNone(self.store.claim("qidian", now=row["due_at"] - 1))
         self.assertIsNotNone(self.store.claim("qidian", now=row["due_at"]))
+
+    def test_overdue_recovery_precedes_new_zero_due_tasks_without_resetting_state(self):
+        for category in ("retry", "budget"):
+            with self.subTest(category=category):
+                platform = "qidian" if category == "retry" else "jjwxc"
+                kind = platform + "_detail"
+                old = self.job("old", platform, kind, now=100)
+                if category == "retry":
+                    self.store.fail(old, "retry", "network_error", now=101)
+                else:
+                    self.store.defer(old, "request_or_time_budget", now=101)
+                self.store.enqueue(platform, kind, {"work_id": "new"})
+                # During the grace period new tasks can still make progress.
+                new = self.store.claim(platform, kind, now=200)
+                self.assertEqual(new["params"]["work_id"], "new")
+                self.store.finish(new, {}, now=201)
+                self.store.enqueue(platform, kind, {"work_id": "newer"})
+                recovered = self.store.claim(platform, kind, now=4000)
+                self.assertEqual(recovered["job_key"], old["job_key"])
+                self.assertEqual(recovered["attempts"], 2)
+
+    def test_recovery_aging_does_not_promote_normal_refresh_or_bypass_backoff(self):
+        old = self.job("refresh", now=100)
+        self.store.finish(old, {}, next_due=200, now=101)
+        retry = self.job("retry", now=102)
+        self.store.fail(retry, "retry", "long_retry_after", retry_after=10000, now=103)
+        self.store.enqueue("qidian", "qidian_detail", {"work_id": "new"})
+        self.assertEqual(self.store.claim("qidian", now=4000)["params"]["work_id"], "new")
+        self.assertEqual(self.store.conn.execute(
+            "SELECT status FROM crawl_jobs WHERE job_key=?", (retry["job_key"],)).fetchone()[0], "retry")
+
+    def test_partial_budget_observation_remains_first_pass_and_can_recover(self):
+        self.configure(self.store, "local")
+        old = self.job("1", "jjwxc", "jjwxc_detail", now=100)
+        self.store.finish(old, {"meta": {"coverage": "budget_exhausted"}}, now=101)
+        self.store.enqueue("jjwxc", "jjwxc_detail", {"work_id": "2"})
+        with patch("crawler_store._clock", return_value=4000):
+            progress = Store.read_summary(self.path)["owned_progress"][0]
+        self.assertEqual(progress["ever_succeeded"], 0)
+        self.assertEqual(progress["first_pass_remaining"], 2)
+        self.assertEqual(progress["due_refresh"], 0)
+        self.assertEqual(self.store.claim("jjwxc", now=4000)["job_key"], old["job_key"])
+
+    def test_summary_reports_owned_first_pass_and_refresh_from_committed_observations(self):
+        self.configure(self.store, "local")
+        for wid, action in (("refresh", "success"), ("retry", "retry"), ("gone", "gone"),
+                            ("deferred", "budget"), ("invalid", "invalid")):
+            job = self.job(wid, "jjwxc", "jjwxc_detail", now=100)
+            if action == "success":
+                self.store.finish(job, {"works": [{"work_id": "1"}]}, next_due=500, now=101)
+            elif action == "budget":
+                self.store.defer(job, "budget", now=101)
+            else:
+                self.store.fail(job, action, "test", now=101)
+        self.store.enqueue("jjwxc", "jjwxc_detail", {"work_id": "new"})
+        # Historic foreign-platform rows are retained but not local progress.
+        self.store.conn.execute("INSERT INTO crawl_jobs(job_key,platform,kind,params_json,priority,due_at,created_at,updated_at) VALUES('foreign','qidian','qidian_detail','{}',100,0,100,100)")
+        with patch("crawler_store._clock", return_value=200):
+            report = Store.read_summary(self.path)
+        row = report["owned_progress"][0]
+        self.assertEqual((row["platform"], row["kind"], row["total"]), ("jjwxc", "jjwxc_detail", 6))
+        self.assertEqual(row["ever_succeeded"], 1)
+        self.assertEqual(row["first_pass_remaining"], 3)
+        self.assertEqual(row["due_first_pass"], 3)
+        self.assertEqual(row["due_retry"], 1)
+        self.assertEqual(row["waiting_refresh"], 1)
+        self.assertEqual(row["due_refresh"], 0)
+        self.assertEqual((row["gone"], row["invalid"]), (1, 1))
+        self.assertEqual(report["owned_counts"], {"works": 1, "dates": 0, "observations": 1})
+        with patch("crawler_store._clock", return_value=600):
+            row = Store.read_summary(self.path)["owned_progress"][0]
+        self.assertEqual((row["waiting_refresh"], row["due_refresh"]), (0, 1))
 
     def test_legacy_invalid_retry_is_not_silently_migrated_or_claimed(self):
         job = self.job("1")

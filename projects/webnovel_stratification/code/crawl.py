@@ -17,7 +17,7 @@ import time
 from crawler_http import BudgetExhausted, Client, FetchError
 from crawler_platforms import ACTIVE_KINDS, KINDS, detail_jobs, initial_catalog_jobs, run_task
 from crawler_store import LeaseError, Store
-from crawler_health import health, isolated_error, missing_attempts, VALIDATION_RECHECKS
+from crawler_health import health, isolated_error, missing_attempts, VALIDATION_RECHECKS, SUCCESSFUL_JOB_SQL
 from cloud_state import StateError, validate_database
 
 
@@ -115,15 +115,48 @@ def refresh_after(job, result):
     return time.time() + (90 if complete else 14) * 86400
 
 
+def task_allocation(conn, platform, only_kinds=None, now=None):
+    """Allocate bounded batch slots from due, never-successful JJWXC work.
+
+    Catalog pages can add many detail jobs at once. Reserve a catalog slot in
+    every cycle while giving an existing detail backlog up to twenty slots.
+    Completed jobs awaiting refresh do not inflate the first-pass backlog.
+    """
+    kinds = list(only_kinds or ACTIVE_KINDS[platform])
+    allocation = {"policy": "explicit_kind" if only_kinds else "round_robin",
+                  "weights": {kind: 1 for kind in kinds}}
+    if platform != "jjwxc" or only_kinds:
+        return kinds, allocation
+    now = time.time() if now is None else now
+    backlog = {kind: 0 for kind in kinds}
+    for kind, count in conn.execute(
+            "SELECT j.kind,count(*) FROM crawl_jobs j WHERE j.platform=? "
+            "AND j.status IN ('pending','retry','blocked') AND j.due_at<=? "
+            "AND NOT " + SUCCESSFUL_JOB_SQL + " GROUP BY j.kind", (platform, now)):
+        if kind in backlog:
+            backlog[kind] = count
+    catalog = max(1, backlog["jjwxc_catalog"])
+    detail_slots = max(1, min(20, (backlog["jjwxc_detail"] + catalog - 1) // catalog))
+    allocation.update(policy="jjwxc_first_pass_backlog", due_first_success=backlog)
+    allocation["weights"]["jjwxc_detail"] = detail_slots
+    return ["jjwxc_catalog"] + ["jjwxc_detail"] * detail_slots, allocation
+
+
 def worker(db, platform, request_budget, seconds, stop, only_kinds=None):
     store = Store(db)
     client = Client(platform, store, max_requests=request_budget, max_seconds=seconds)
-    kinds = only_kinds or ACTIVE_KINDS[platform]
     position = 0
     invalid_streak = 0
     started = time.monotonic()
     report = {"platform": platform, "succeeded": 0, "errors": {}, "exit_reason": "no_due_tasks"}
     try:
+        kinds, report["task_allocation"] = task_allocation(store.conn, platform, only_kinds)
+        report["by_kind"] = {kind: {"succeeded": 0, "errors": {}} for kind in dict.fromkeys(kinds)}
+
+        def record_error(kind, category):
+            for errors in (report["errors"], report["by_kind"][kind]["errors"]):
+                errors[category] = errors.get(category, 0) + 1
+
         if health(store.conn, [platform])["halt_required"]:
             report.update(exit_reason="validation_halted", requests=0,
                           needs_attention=True, halt_required=True)
@@ -136,9 +169,14 @@ def worker(db, platform, request_budget, seconds, stop, only_kinds=None):
                 report["exit_reason"] = "platform_cooldown"
                 break
             job = None
+            tried = set()
             for index in range(len(kinds)):
                 selected = (position + index) % len(kinds)
-                job = store.claim(platform, kind=kinds[selected], lease_seconds=seconds + 120)
+                kind = kinds[selected]
+                if kind in tried:
+                    continue
+                tried.add(kind)
+                job = store.claim(platform, kind=kind, lease_seconds=seconds + 120)
                 if job:
                     position = (selected + 1) % len(kinds)
                     break
@@ -149,6 +187,7 @@ def worker(db, platform, request_budget, seconds, stop, only_kinds=None):
                     output = run_task(client, job)
                     store.finish(job, output, next_due=refresh_after(job, output))
                     report["succeeded"] += 1
+                    report["by_kind"][job["kind"]]["succeeded"] += 1
                     invalid_streak = 0
                 except BudgetExhausted:
                     store.defer(job, "request_or_time_budget")
@@ -162,7 +201,7 @@ def worker(db, platform, request_budget, seconds, stop, only_kinds=None):
                         if missing_attempts(store.conn, job) + 1 < VALIDATION_RECHECKS:
                             category = "retry"
                     store.fail(job, category, str(error), retry_after=error.retry_after)
-                    report["errors"][category] = report["errors"].get(category, 0) + 1
+                    record_error(job["kind"], category)
                     invalid_streak = invalid_streak + 1 if category == "invalid" else 0
                     if error.category == "blocked":
                         report["exit_reason"] = "platform_cooldown"
@@ -173,13 +212,13 @@ def worker(db, platform, request_budget, seconds, stop, only_kinds=None):
                 except ValueError as error:
                     # Invalid output must not advance the page cursor.
                     store.fail(job, "invalid", str(error))
-                    report["errors"]["invalid"] = report["errors"].get("invalid", 0) + 1
+                    record_error(job["kind"], "invalid")
                     invalid_streak += 1
                 except LeaseError:
                     raise
                 except Exception as error:
                     store.fail(job, "invalid", "internal_" + type(error).__name__)
-                    report["errors"]["internal"] = report["errors"].get("internal", 0) + 1
+                    record_error(job["kind"], "internal")
                     report["exit_reason"] = "internal_error"
                     break
             except LeaseError:

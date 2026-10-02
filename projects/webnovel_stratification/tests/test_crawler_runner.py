@@ -73,6 +73,122 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(seen, ["qidian_catalog"])
         self.assertEqual(self.store.conn.execute("SELECT attempts FROM crawl_jobs WHERE kind='qidian_chapters'").fetchone()[0], 0)
 
+    def jjwxc_jobs(self, catalogs, details):
+        self.store.enqueue_many([
+            *({"platform": "jjwxc", "kind": "jjwxc_catalog", "params": {"page": n}}
+              for n in range(catalogs)),
+            *({"platform": "jjwxc", "kind": "jjwxc_detail", "params": {"work_id": str(n)}}
+              for n in range(details)),
+        ])
+
+    def bounded_worker(self, budget, effect=None, only_kinds=None, platform="jjwxc"):
+        seen = []
+        def one_request(client, job):
+            client.requests += 1
+            seen.append(job["kind"])
+            return effect(job) if effect else {}
+        with patch.object(crawl, "Client", FakeClient), patch.object(crawl, "run_task", side_effect=one_request):
+            report = crawl.worker(self.db, platform, budget, 1200, threading.Event(), only_kinds)
+        return report, seen
+
+    def test_jjwxc_backlog_gets_more_detail_slots_with_fixed_request_budget(self):
+        self.jjwxc_jobs(catalogs=3, details=30)
+        report, seen = self.bounded_worker(22)
+        self.assertEqual(seen, (["jjwxc_catalog"] + ["jjwxc_detail"] * 10) * 2)
+        self.assertEqual(report["requests"], 22)
+        self.assertEqual(report["exit_reason"], "budget_exhausted")
+        self.assertEqual(report["task_allocation"]["weights"], {"jjwxc_catalog": 1, "jjwxc_detail": 10})
+        self.assertEqual(report["by_kind"], {
+            "jjwxc_catalog": {"succeeded": 2, "errors": {}},
+            "jjwxc_detail": {"succeeded": 20, "errors": {}},
+        })
+
+    def test_jjwxc_detail_weight_is_capped_and_catalog_keeps_a_slot(self):
+        self.jjwxc_jobs(catalogs=3, details=90)
+        report, seen = self.bounded_worker(22)
+        self.assertEqual(report["task_allocation"]["weights"]["jjwxc_detail"], 20)
+        self.assertEqual(seen[0], "jjwxc_catalog")
+        self.assertEqual(seen[21], "jjwxc_catalog")
+        self.assertEqual(seen.count("jjwxc_detail"), 20)
+
+    def test_allocation_counts_first_success_not_pending_refreshes_and_recomputes(self):
+        self.jjwxc_jobs(catalogs=2, details=5)
+        # Successful refreshable jobs remain pending and have no completed_at.
+        for _ in range(4):
+            job = self.store.claim("jjwxc", "jjwxc_detail", now=100)
+            self.store.finish(job, {}, next_due=200, now=101)
+        _, allocation = crawl.task_allocation(self.store.conn, "jjwxc", now=300)
+        self.assertEqual(allocation["due_first_success"], {"jjwxc_catalog": 2, "jjwxc_detail": 1})
+        self.assertEqual(allocation["weights"]["jjwxc_detail"], 1)
+        for n in range(5, 11):
+            self.store.enqueue("jjwxc", "jjwxc_detail", {"work_id": str(n)})
+        self.store.enqueue("jjwxc", "jjwxc_detail", {"work_id": "future"}, due_at=301)
+        _, allocation = crawl.task_allocation(self.store.conn, "jjwxc", now=300)
+        self.assertEqual(allocation["due_first_success"]["jjwxc_detail"], 7)
+        self.assertEqual(allocation["weights"]["jjwxc_detail"], 4)
+
+    def test_empty_kind_falls_back_without_repeating_the_same_empty_claim(self):
+        self.jjwxc_jobs(catalogs=5, details=40)
+        # Three successful catalogs due again do not count as first-pass backlog.
+        for _ in range(3):
+            job = self.store.claim("jjwxc", "jjwxc_catalog", now=100)
+            self.store.finish(job, {}, next_due=200, now=101)
+        real_claim = Store.claim
+        tried = []
+        def claim(store, platform, kind=None, **kwargs):
+            self.assertNotIn(kind, tried)
+            tried.append(kind)
+            return real_claim(store, platform, kind=kind, **kwargs)
+        def collected(_job):
+            tried.clear()
+            return {}
+        with patch.object(Store, "claim", new=claim):
+            report, seen = self.bounded_worker(100, effect=collected)
+        self.assertEqual(report["task_allocation"]["weights"]["jjwxc_detail"], 20)
+        self.assertEqual(seen.count("jjwxc_catalog"), 5)
+        self.assertEqual(seen.count("jjwxc_detail"), 40)
+        self.assertEqual(report["exit_reason"], "no_due_tasks")
+        self.assertEqual(set(tried), {"jjwxc_catalog", "jjwxc_detail"})
+
+    def test_details_use_budget_when_catalog_is_empty_and_explicit_kind_wins(self):
+        self.jjwxc_jobs(catalogs=0, details=50)
+        report, seen = self.bounded_worker(30)
+        self.assertEqual(seen, ["jjwxc_detail"] * 30)
+        self.assertEqual(report["requests"], 30)
+        self.store.enqueue("jjwxc", "jjwxc_catalog", {"page": 1})
+        report, seen = self.bounded_worker(1, only_kinds=["jjwxc_catalog"])
+        self.assertEqual(seen, ["jjwxc_catalog"])
+        self.assertEqual(report["task_allocation"], {
+            "policy": "explicit_kind", "weights": {"jjwxc_catalog": 1}})
+        self.assertEqual(set(report["by_kind"]), {"jjwxc_catalog"})
+
+    def test_qidian_keeps_its_existing_round_robin_allocation(self):
+        for n in range(10):
+            self.store.enqueue("qidian", "qidian_detail", {"work_id": str(n)})
+            self.store.enqueue("qidian", "qidian_dates", {"work_id": str(n)})
+        report, seen = self.bounded_worker(5, platform="qidian")
+        self.assertEqual(seen, ["qidian_catalog", "qidian_detail", "qidian_dates", "qidian_detail", "qidian_dates"])
+        self.assertEqual(report["task_allocation"], {
+            "policy": "round_robin", "weights": {"qidian_catalog": 1, "qidian_detail": 1, "qidian_dates": 1}})
+
+    def test_worker_reports_good_and_bad_pages_by_kind(self):
+        self.jjwxc_jobs(catalogs=1, details=3)
+        failures = iter([FetchError("invalid", "bad_identity"),
+                         FetchError("gone", "http_404"), FetchError("retry", "network_error")])
+        def result(job):
+            if job["kind"] == "jjwxc_detail":
+                raise next(failures)
+            return {}
+        report, _ = self.bounded_worker(4, effect=result)
+        self.assertEqual(report["succeeded"], 1)
+        self.assertEqual(report["errors"], {"invalid": 1, "gone": 1, "retry": 1})
+        self.assertEqual(report["by_kind"], {
+            "jjwxc_catalog": {"succeeded": 1, "errors": {}},
+            "jjwxc_detail": {"succeeded": 0, "errors": report["errors"]},
+        })
+        self.assertTrue(report["needs_attention"])
+        self.assertTrue(report["halt_required"])
+
     def test_transient_failure_stays_retryable(self):
         report = self.worker(FetchError("retry", "connection_closed"))
         self.assertEqual(report["errors"], {"retry": 1})

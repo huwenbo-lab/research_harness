@@ -3,12 +3,12 @@ name: Durable webnovel metadata collection
 # Normal runs require an explicitly bootstrapped, audited cloud-node snapshot.
 # The one-time dispatch inputs name two .sqlite.gz assets in this repository's
 # fixed webnovel-crawler-bootstrap release; no arbitrary URL or empty init exists.
-# Each five-minute Qidian batch is exported, audited, and published before the
-# next batch. Assets retain the true run/attempt and add an independent batch ID.
+# Each five-minute Qidian batch is exported, audited, and published. Assets
+# retain the true run/attempt and add an independent batch ID.
 on:
   schedule:
-    # Three eight-hour cycles stay below the monthly release's 1,000-asset cap.
-    - cron: '23 3,11,19 * * *'
+    # One batch every two hours: 252 assets per ISO week, before manual reruns.
+    - cron: '23 */2 * * *'
   workflow_dispatch:
     inputs:
       bootstrap_source_asset:
@@ -55,7 +55,7 @@ jobs:
           python -m unittest discover -s tests -p 'test_cloud_*.py'
           python -m unittest discover -s tests -p 'test_local_service.py'
 
-      - name: Restore and run up to three durable cloud-node batches
+      - name: Restore and run one durable cloud-node batch
         id: cycle
         env:
           GH_TOKEN: ${{ github.token }}
@@ -64,7 +64,7 @@ jobs:
         run: |
           python code/cloud_cycle.py --repo "$GITHUB_REPOSITORY" \
             --run-id "$GITHUB_RUN_ID" --attempt "$GITHUB_RUN_ATTEMPT" --target "$GITHUB_SHA" \
-            --db state/crawler.sqlite --out out --batches 3 \
+            --db state/crawler.sqlite --out out --batches 1 \
             --max-requests 50 --max-seconds 300 \
             --bootstrap-source-asset "$BOOTSTRAP_SOURCE_ASSET" \
             --bootstrap-previous-asset "$BOOTSTRAP_PREVIOUS_ASSET"

@@ -151,7 +151,7 @@ class CloudCycleTests(unittest.TestCase):
         self.remote.cancel_pointer = "before_replace"
         with self.assertRaises(KeyboardInterrupt):
             self.publish_batch()
-        self.assertIn(("webnovel-crawler-202609", "crawler-200-1.sqlite.gz"), self.remote.assets)
+        self.assertIn(("webnovel-crawler-2026-W38", "crawler-200-1.sqlite.gz"), self.remote.assets)
         self.assertEqual(self.remote.assets[(POINTER_TAG, POINTER_ASSET)], self.original_pointer)
         self.assertEqual(self.restart_from_remote(), (1, 1))
 
@@ -165,7 +165,7 @@ class CloudCycleTests(unittest.TestCase):
             restore(self.remote, REPO, recovered, self.root / "restart" / "restored.json")
         self.assertFalse(recovered.exists())
         self.assertIn(("webnovel-crawler-202609", "crawler-100-1.sqlite.gz"), self.remote.assets)
-        self.assertIn(("webnovel-crawler-202609", "crawler-200-1.sqlite.gz"), self.remote.assets)
+        self.assertIn(("webnovel-crawler-2026-W38", "crawler-200-1.sqlite.gz"), self.remote.assets)
 
     def test_published_batch_resumes_followup_after_runner_loss(self):
         self.finish_page()
@@ -496,6 +496,16 @@ class CloudCycleTests(unittest.TestCase):
         self.assertEqual({(pointer["run_id"], pointer["attempt"]) for pointer in pointers}, {("200", 1)})
         self.assertEqual([pointer["asset"] for pointer in pointers], [f"crawler-200-1-b{i}.sqlite.gz" for i in (1, 2, 3)])
         self.assertEqual(self.restart_from_remote(), (4, 4))
+
+    def test_single_batch_cycle_publishes_once_and_resumes_from_saved_progress(self):
+        result = self.cycle(self.cycle_executor(), batches=1)
+        self.assertEqual(self.executed_batches, 1)
+        self.assertEqual(self.previous_work_counts, [1])
+        self.assertFalse(result["needs_attention"])
+        self.assertEqual(len(result["completed_batches"]), 1)
+        self.assertEqual(result["completed_batches"][0]["pointer"]["batch"], 1)
+        self.assertEqual(len(self.remote.assets), 5)
+        self.assertEqual(self.restart_from_remote(), (2, 2))
 
     def test_failed_cloud_node_preflight_never_collects_exports_or_publishes(self):
         with self.assertRaisesRegex(StateError, "cloud-node audit failed"):

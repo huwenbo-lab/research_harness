@@ -12,6 +12,7 @@ import unittest
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code"))
 from cloud_state import (GitHubReleases, POINTER_ASSET, POINTER_TAG, StateError,
@@ -132,6 +133,46 @@ class CloudStateTests(unittest.TestCase):
         self.assertEqual(record["pointer"], POINTER)
         self.assertEqual(json.loads(self.receipt.read_text())["database"], str(self.out.resolve()))
         self.assertEqual(len(self.store.downloads), 2)
+
+    def test_weekly_snapshot_restores_without_rewriting_legacy_monthly_state(self):
+        self.store.pointer = dict(POINTER, tag="webnovel-crawler-2026-W38")
+        record = restore(self.store, REPO, self.out, self.receipt)
+        self.assertEqual(self.source.read_bytes(), self.out.read_bytes())
+        self.assertEqual(record["pointer"], self.store.pointer)
+        self.assertEqual(self.store.downloads[-1], ("webnovel-crawler-2026-W38", POINTER["asset"]))
+        self.assertEqual(self.store.uploads, [])
+
+    def test_snapshot_tags_accept_real_iso_weeks_and_legacy_months(self):
+        for tag in ("webnovel-crawler-202609", "webnovel-crawler-2026-W38",
+                    "webnovel-crawler-2026-W53", "webnovel-crawler-2027-W01"):
+            with self.subTest(tag=tag):
+                self.assertEqual(validate_pointer(dict(POINTER, tag=tag), REPO)["tag"], tag)
+        for tag in ("webnovel-crawler-2025-W53", "webnovel-crawler-2026-W00",
+                    "webnovel-crawler-2026-W54", "webnovel-crawler-0000-W01",
+                    "webnovel-crawler-2026-W1", "webnovel-crawler-2026-W01/extra",
+                    "../webnovel-crawler-2026-W01", "webnovel-crawler-202600"):
+            with self.subTest(tag=tag), self.assertRaises(StateError):
+                validate_pointer(dict(POINTER, tag=tag), REPO)
+
+    def test_cross_year_weekly_publication_preserves_predecessor_lineage(self):
+        self.prepare_publish()
+        first = publish(self.store, REPO, self.out, self.summary, self.audit, self.receipt,
+                        "200", 2, "main", now=datetime(2027, 1, 3, 23, 59, tzinfo=timezone.utc), batch=1)
+        self.assertEqual(first["tag"], "webnovel-crawler-2026-W53")
+        record = json.loads(self.receipt.read_text())
+        record["pointer"] = first
+        write_json(self.receipt, record)
+        second = publish(self.store, REPO, self.out, self.summary, self.audit, self.receipt,
+                         "200", 2, "main", now=datetime(2027, 1, 4, tzinfo=timezone.utc), batch=2)
+        self.assertEqual(second["tag"], "webnovel-crawler-2027-W01")
+        self.assertIn(POINTER["asset"], self.store.assets[POINTER["tag"]])
+        self.assertIn(first["asset"], self.store.assets[first["tag"]])
+        self.assertIn(second["asset"], self.store.assets[second["tag"]])
+        self.assertEqual(self.store.pointer, second)
+        before_uploads = len(self.store.uploads)
+        with self.assertRaisesRegex(StateError, "changed after restore"):
+            self.publish(batch=3)
+        self.assertEqual(len(self.store.uploads), before_uploads)
 
     def test_batch_pointer_requires_matching_positive_integer_field_and_asset(self):
         valid = dict(POINTER, asset="crawler-100-1-b2.sqlite.gz", batch=2)
@@ -263,6 +304,15 @@ class CloudStateTests(unittest.TestCase):
                 self.assertFalse(any(tag == POINTER_TAG for tag, *_ in self.store.uploads))
                 self.assertTrue(all(not replaced for _, _, replaced, _ in self.store.uploads))
 
+    def test_release_capacity_failure_never_uploads_or_advances_pointer(self):
+        self.prepare_publish()
+        with patch.object(self.store, "ensure_monthly_release",
+                          side_effect=StateError("Snapshot release lacks room for three assets")):
+            with self.assertRaisesRegex(StateError, "lacks room"):
+                self.publish()
+        self.assertEqual(self.store.uploads, [])
+        self.assertEqual(self.store.pointer, POINTER)
+
     def test_blocked_collection_still_publishes_audited_state_pointer_last(self):
         self.prepare_publish()
         pointer = self.publish()
@@ -303,7 +353,9 @@ class CloudStateTests(unittest.TestCase):
     def test_bootstrap_refuses_existing_pointer_or_orphan_snapshot(self):
         for assets in ({POINTER_TAG: {POINTER_ASSET}},
                        {POINTER["tag"]: {POINTER["asset"]}},
-                       {POINTER["tag"]: {"crawler-200-2.summary.json"}}):
+                       {POINTER["tag"]: {"crawler-200-2.summary.json"}},
+                       {"webnovel-crawler-2026-W38": {"crawler-200-2.sqlite.gz"}},
+                       {"webnovel-crawler-2026-W38": {"crawler-200-2.audit.json"}}):
             with self.subTest(assets=assets):
                 self.prepare_bootstrap()
                 self.store.assets = assets
@@ -360,21 +412,27 @@ class GitHubCommandTests(unittest.TestCase):
     def test_inventory_confirms_absence_only_after_successful_all_page_read(self):
         calls = []
         outputs = iter((json.dumps([[{"id": 123, "tag_name": POINTER_TAG}],
-                                    [{"id": 456, "tag_name": "webnovel-crawler-202609"}]]),
-                        json.dumps([[]]), json.dumps([[{"name": "crawler-200-2.sqlite.gz"}]])))
+                                    [{"id": 456, "tag_name": "webnovel-crawler-202609"}],
+                                    [{"id": 789, "tag_name": "webnovel-crawler-2026-W38"}]]),
+                        json.dumps([[]]), json.dumps([[{"name": "crawler-200-2.sqlite.gz"}]]),
+                        json.dumps([[{"name": "crawler-201-1-b1.sqlite.gz"}],
+                                    [{"name": "crawler-201-1-b1.audit.json"}]])))
         def runner(args, **kwargs):
             calls.append(args)
             return subprocess.CompletedProcess(args, 0, next(outputs), "")
         inventory = GitHubReleases(REPO, runner=runner).inventory()
-        self.assertEqual(inventory, {POINTER_TAG: set(), "webnovel-crawler-202609": {"crawler-200-2.sqlite.gz"}})
-        self.assertEqual(len(calls), 3)
+        self.assertEqual(inventory, {POINTER_TAG: set(), "webnovel-crawler-202609": {"crawler-200-2.sqlite.gz"},
+                                     "webnovel-crawler-2026-W38": {"crawler-201-1-b1.sqlite.gz",
+                                                                  "crawler-201-1-b1.audit.json"}})
+        self.assertEqual(len(calls), 4)
         self.assertTrue(all("--paginate" in args and "--slurp" in args for args in calls))
 
     def test_inventory_error_or_malformed_json_is_never_empty_inventory(self):
         for result in (subprocess.CompletedProcess([], 1, "", "authorization failed"),
                        subprocess.CompletedProcess([], 0, "not json", ""),
                        subprocess.CompletedProcess([], 0, '{}', ""),
-                       subprocess.CompletedProcess([], 0, '[[{"tag_name":"webnovel-crawler-state","id":"../../bad"}]]', "")):
+                       subprocess.CompletedProcess([], 0, '[[{"tag_name":"webnovel-crawler-state","id":"../../bad"}]]', ""),
+                       subprocess.CompletedProcess([], 0, '[[{"tag_name":"webnovel-crawler-2025-W53","id":123}]]', "")):
             with self.subTest(result=result), self.assertRaises(StateError):
                 GitHubReleases(REPO, runner=lambda *args, **kwargs: result).inventory()
 
@@ -462,6 +520,38 @@ class GitHubCommandTests(unittest.TestCase):
         with self.assertRaises(StateError):
             store.ensure_monthly_release("webnovel-crawler-202609", "main")
         self.assertEqual(len(calls), 1)
+
+    def test_existing_snapshot_release_checks_all_asset_pages_before_upload(self):
+        tag = "webnovel-crawler-2026-W38"
+        for count, should_fail in ((997, False), (998, True), (1000, True)):
+            with self.subTest(count=count):
+                calls = []
+                outputs = iter((tag + "\n", "123\n", "100\n" * 9 + str(count - 900) + "\n"))
+                def runner(args, **kwargs):
+                    calls.append(args)
+                    return subprocess.CompletedProcess(args, 0, next(outputs), "")
+                store = GitHubReleases(REPO, runner=runner)
+                if should_fail:
+                    with self.assertRaisesRegex(StateError, "before upload"):
+                        store.ensure_monthly_release(tag, "main")
+                else:
+                    store.ensure_monthly_release(tag, "main")
+                self.assertEqual(len(calls), 3)
+                self.assertTrue(all(args[1] == "api" for args in calls))
+                self.assertIn("--paginate", calls[-1])
+
+    def test_snapshot_capacity_read_errors_stop_without_mutations(self):
+        tag = "webnovel-crawler-2026-W38"
+        for identity, counts in (("invalid", "0"), ("123", ""), ("123", "not a count")):
+            with self.subTest(identity=identity, counts=counts):
+                calls = []
+                outputs = iter((tag, identity, counts))
+                def runner(args, **kwargs):
+                    calls.append(args)
+                    return subprocess.CompletedProcess(args, 0, next(outputs), "")
+                with self.assertRaises(StateError):
+                    GitHubReleases(REPO, runner=runner).ensure_monthly_release(tag, "main")
+                self.assertTrue(all(args[1] == "api" for args in calls))
 
     def test_invalid_repository_is_rejected_without_a_command(self):
         for repo in ("../repository", "owner/repository/extra", "https://github.com/owner/repo", "-flag/repo"):

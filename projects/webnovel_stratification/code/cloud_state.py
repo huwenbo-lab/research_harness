@@ -25,6 +25,8 @@ POINTER_TAG = "webnovel-crawler-state"
 POINTER_ASSET = "latest.json"
 REPOSITORY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*")
 SNAPSHOT_PATTERN = re.compile(r"crawler-([1-9][0-9]*)-([1-9][0-9]*)(?:-b([1-9][0-9]*))?\.sqlite\.gz")
+SNAPSHOT_TAG_PATTERN = re.compile(r"webnovel-crawler-(?:([0-9]{6})|([0-9]{4})-W([0-9]{2}))")
+RELEASE_ASSET_LIMIT = 1000
 REQUIRED_TABLES = (
     "work_master", "crawl_meta", "crawl_jobs", "crawl_platforms", "crawl_events",
     "crawl_observations", "crawl_works", "crawl_work_dates", "crawl_date_evidence",
@@ -44,8 +46,23 @@ def validate_repository(repo: str) -> str:
     return repo
 
 
+def validate_snapshot_tag(tag: object) -> str:
+    """Keep old monthly snapshots readable while publishing by ISO week."""
+    match = SNAPSHOT_TAG_PATTERN.fullmatch(tag) if isinstance(tag, str) else None
+    if not match:
+        raise StateError("Invalid snapshot tag")
+    try:
+        if match[1]:
+            datetime.strptime(match[1], "%Y%m")
+        else:
+            datetime.fromisocalendar(int(match[2]), int(match[3]), 1)
+    except ValueError as exc:
+        raise StateError("Invalid snapshot month or ISO week") from exc
+    return tag
+
+
 def validate_pointer(pointer: object, repo: str) -> dict:
-    """Accept only same-repository, named monthly snapshots; never arbitrary URLs."""
+    """Accept only same-repository, named snapshots; never arbitrary URLs."""
     validate_repository(repo)
     if not isinstance(pointer, dict):
         raise StateError("State pointer must be an object")
@@ -56,13 +73,7 @@ def validate_pointer(pointer: object, repo: str) -> dict:
         raise StateError("Unsupported state pointer schema")
     if pointer["source_repo"] != repo:
         raise StateError("State pointer belongs to another repository")
-    tag = pointer["tag"]
-    if not isinstance(tag, str) or not re.fullmatch(r"webnovel-crawler-[0-9]{6}", tag):
-        raise StateError("Invalid monthly snapshot tag")
-    try:
-        datetime.strptime(tag.removeprefix("webnovel-crawler-"), "%Y%m")
-    except ValueError as exc:
-        raise StateError("Invalid snapshot month") from exc
+    validate_snapshot_tag(pointer["tag"])
     asset = pointer["asset"]
     match = SNAPSHOT_PATTERN.fullmatch(asset) if isinstance(asset, str) else None
     if not match:
@@ -170,6 +181,10 @@ class GitHubReleases:
         return path
 
     def ensure_monthly_release(self, tag: str, target: str) -> None:
+        # Retain the store interface for older callers and recovery test stores.
+        # New snapshots use weekly tags; this also serves the pointer release.
+        if tag != POINTER_TAG:
+            validate_snapshot_tag(tag)
         # A network/authentication error must not be mistaken for a missing release.
         tags = self.command("api", "--paginate", f"repos/{self.repo}/releases",
                             "--jq", ".[].tag_name", retry_read=True).splitlines()
@@ -177,6 +192,18 @@ class GitHubReleases:
             self.command("release", "create", tag, "--repo", self.repo,
                          "--target", target, "--latest=false", "--title", tag,
                          "--notes", "Immutable audited crawler snapshots; latest.json is stored in webnovel-crawler-state.")
+        elif tag != POINTER_TAG:
+            release_id = self.command("api", f"repos/{self.repo}/releases/tags/{tag}",
+                                      "--jq", ".id", retry_read=True).strip()
+            if not re.fullmatch(r"[1-9][0-9]*", release_id):
+                raise StateError("GitHub returned an invalid snapshot release identity")
+            counts = self.command("api", "--paginate",
+                                  f"repos/{self.repo}/releases/{release_id}/assets?per_page=100",
+                                  "--jq", "length", retry_read=True).splitlines()
+            if not counts or any(not re.fullmatch(r"[0-9]+", count) for count in counts):
+                raise StateError("GitHub returned invalid snapshot asset counts")
+            if sum(map(int, counts)) + 3 > RELEASE_ASSET_LIMIT:
+                raise StateError("Snapshot release lacks room for three assets; publication stopped before upload")
 
     def ensure_pointer_release(self, target: str) -> None:
         self.ensure_monthly_release(POINTER_TAG, target)
@@ -198,8 +225,10 @@ class GitHubReleases:
             if not isinstance(release, dict) or not isinstance(release.get("tag_name"), str):
                 raise StateError("GitHub inventory returned an invalid release")
             tag = release["tag_name"]
-            if tag != POINTER_TAG and not re.fullmatch(r"webnovel-crawler-[0-9]{6}", tag):
+            if tag != POINTER_TAG and not SNAPSHOT_TAG_PATTERN.fullmatch(tag):
                 continue
+            if tag != POINTER_TAG:
+                validate_snapshot_tag(tag)
             if type(release.get("id")) is not int or release["id"] <= 0 or tag in result:
                 raise StateError("GitHub inventory returned an invalid release identity")
             assets = pages(f"repos/{self.repo}/releases/{release['id']}/assets")
@@ -283,7 +312,8 @@ def _publish_snapshot(store: GitHubReleases, repo: str, db: Path, summary: Path,
     if stamp.utcoffset() is None:
         raise StateError("Publication time requires a time zone")
     stamp = stamp.astimezone(timezone.utc)
-    tag = "webnovel-crawler-" + stamp.strftime("%Y%m")
+    iso_year, iso_week, _ = stamp.isocalendar()
+    tag = f"webnovel-crawler-{iso_year:04d}-W{iso_week:02d}"
     stem = f"crawler-{run_id}-{attempt}"
     if batch is not None:
         stem += f"-b{batch}"

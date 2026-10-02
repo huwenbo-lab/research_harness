@@ -87,6 +87,35 @@ class HealthTests(unittest.TestCase):
         self.assertFalse(report["halt_required"])
         self.assertTrue(self.store.platform_status("jjwxc")["blocked"])
 
+    def test_starved_retry_and_budget_deferral_warn_without_halting(self):
+        for wid, failure in (("retry", True), ("deferred", False)):
+            self.enqueue(wid)
+            job = self.store.claim("jjwxc", now=100)
+            if failure:
+                self.store.fail(job, "retry", "network_error", now=101)
+            else:
+                self.store.defer(job, "budget", now=101)
+        self.enqueue("new")
+        self.enqueue("future")
+        job = self.store.claim("jjwxc", now=102)
+        self.store.fail(job, "retry", "server_delay", retry_after=200000, now=103)
+        self.assertFalse(health(self.store.conn, ["jjwxc"], now=200)["needs_attention"])
+        report = health(self.store.conn, ["jjwxc"], now=100000)
+        self.assertEqual(report["overdue_recovery_jobs"], 2)
+        self.assertEqual(report["slow_retry_jobs"], 0)
+        self.assertTrue(report["needs_attention"])
+        self.assertFalse(report["halt_required"])
+        self.assertEqual(health(self.store.conn, ["qidian"], now=100000)["overdue_recovery_jobs"], 0)
+
+    def test_recent_manual_repair_is_not_overdue_from_epoch_zero(self):
+        key = self.enqueue("1")
+        job = self.store.claim("jjwxc", now=100)
+        self.store.fail(job, "invalid", "jjwxc_work_metadata_missing", now=101)
+        self.store.conn.execute(
+            "UPDATE crawl_jobs SET status='pending',due_at=0,updated_at=100000 WHERE job_key=?", (key,))
+        self.assertEqual(health(self.store.conn, ["jjwxc"], now=100001)["overdue_recovery_jobs"], 0)
+        self.assertEqual(health(self.store.conn, ["jjwxc"], now=200000)["overdue_recovery_jobs"], 1)
+
     def test_three_distinct_bad_works_halt_across_batches_despite_catalog_success(self):
         for index in range(3):
             self.enqueue(str(index + 1))

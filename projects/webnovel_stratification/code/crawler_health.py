@@ -7,6 +7,7 @@ Existing events make the circuit survive restarts and alternating task kinds.
 from contextlib import closing
 from pathlib import Path
 import sqlite3
+import time
 
 
 MISSING_METADATA = {
@@ -15,6 +16,16 @@ MISSING_METADATA = {
 }
 VALIDATION_RECHECKS = 3
 CIRCUIT_WORKS = 3
+RECOVERY_PRIORITY_AFTER = 3600
+RECOVERY_ALERT_AFTER = 86400
+SUCCESSFUL_JOB_SQL = """EXISTS(SELECT 1 FROM crawl_observations o
+    WHERE o.job_key=j.job_key AND (o.coverage IS NULL OR o.coverage!='budget_exhausted'))"""
+# Explicit repairs use due_at=0; their age starts at repair, not at the epoch.
+RECOVERY_DUE_SQL = "(CASE WHEN j.due_at=0 THEN j.updated_at ELSE j.due_at END)"
+# A successful job scheduled for refresh is not unfinished first-pass work.
+# Both the scheduler and health checks use the same recovery definition.
+RECOVERY_JOB_SQL = f"""(j.status IN ('retry','blocked') OR
+    (j.status='pending' AND j.attempts>0 AND NOT {SUCCESSFUL_JOB_SQL}))"""
 
 
 def isolated_error(kind, message):
@@ -31,9 +42,11 @@ def missing_attempts(conn, job):
     ).fetchone()[0]
 
 
-def health(conn, platforms):
+def health(conn, platforms, now=None):
     platforms = list(platforms)
     quarantined = blocking = slow_retries = 0
+    overdue_recovery = 0
+    now = time.time() if now is None else now
     circuits = []
     for platform in platforms:
         for kind, message, category in conn.execute(
@@ -46,6 +59,10 @@ def health(conn, platforms):
         slow_retries += conn.execute(
             "SELECT count(*) FROM crawl_jobs WHERE platform=? AND status='retry' "
             "AND failure_count>=5", (platform,)).fetchone()[0]
+        overdue_recovery += conn.execute(
+            "SELECT count(*) FROM crawl_jobs j WHERE j.platform=? AND "
+            + RECOVERY_DUE_SQL + "<=? AND " + RECOVERY_JOB_SQL,
+            (platform, now - RECOVERY_ALERT_AFTER)).fetchone()[0]
         for kind, reason in MISSING_METADATA.items():
             if not kind.startswith(platform + "_"):
                 continue
@@ -67,7 +84,8 @@ def health(conn, platforms):
     return {"halt_required": halt, "quarantined_jobs": quarantined,
             "blocking_invalid_jobs": blocking, "validation_circuits": circuits,
             "slow_retry_jobs": slow_retries,
-            "needs_attention": bool(halt or quarantined or slow_retries)}
+            "overdue_recovery_jobs": overdue_recovery,
+            "needs_attention": bool(halt or quarantined or slow_retries or overdue_recovery)}
 
 
 def read_health(db, platforms):

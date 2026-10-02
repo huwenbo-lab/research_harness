@@ -19,6 +19,8 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from crawler_health import RECOVERY_DUE_SQL, RECOVERY_JOB_SQL, RECOVERY_PRIORITY_AFTER, SUCCESSFUL_JOB_SQL
+
 
 class LeaseError(RuntimeError):
     """The worker no longer owns an unexpired lease."""
@@ -289,12 +291,19 @@ class Store:
             )
             if self.platform_status(platform, now)["blocked_until"] > now:
                 return None
-            query = "SELECT * FROM crawl_jobs WHERE platform=? AND status IN ('pending','retry','blocked') AND due_at<=?"
+            query = "SELECT j.* FROM crawl_jobs j WHERE platform=? AND status IN ('pending','retry','blocked') AND due_at<=?"
             params = [platform, now]
             if kind is not None:
                 query += " AND kind=?"
                 params.append(kind)
-            row = self.conn.execute(query + " ORDER BY priority,due_at,created_at,job_key LIMIT 1", params).fetchone()
+            # New tasks have due_at=0. Without aging, an endless discovery queue
+            # can starve already-due retries and unfinished budget deferrals.
+            row = self.conn.execute(
+                query + " AND " + RECOVERY_DUE_SQL + "<=? AND " + RECOVERY_JOB_SQL
+                + " ORDER BY due_at,priority,created_at,job_key LIMIT 1",
+                [*params, now - RECOVERY_PRIORITY_AFTER]).fetchone()
+            if row is None:
+                row = self.conn.execute(query + " ORDER BY priority,due_at,created_at,job_key LIMIT 1", params).fetchone()
             if row is None:
                 return None
             token = uuid.uuid4().hex
@@ -922,10 +931,39 @@ class Store:
         unresolved = conn.execute("SELECT count(DISTINCT job_key) FROM crawl_observations o WHERE job_key IS NOT NULL AND coverage IN (" + placeholders + ") AND observation_id=(SELECT observation_id FROM crawl_observations x WHERE x.job_key=o.job_key ORDER BY observed_ts DESC,recorded_at DESC,observation_id DESC LIMIT 1)", unresolved_labels).fetchone()[0]
         invalid_catalog = conn.execute("SELECT count(*) FROM crawl_jobs WHERE kind LIKE '%catalog%' AND status='invalid'").fetchone()[0]
         now = _clock()
+        owned_counts = {}
+        owned_progress = []
+        if owned:
+            owned_filter = ",".join("?" for _ in owned)
+            for label, table in (("works", "crawl_works"), ("dates", "crawl_work_dates"),
+                                 ("observations", "crawl_observations")):
+                owned_counts[label] = conn.execute(
+                    f"SELECT count(*) FROM {table} WHERE platform IN ({owned_filter})", owned).fetchone()[0]
+            # A successful refreshable task returns to pending with completed_at
+            # NULL; committed observations, not pending/done, prove prior success.
+            owned_progress = [dict(row) for row in conn.execute(f"""
+                WITH progress AS MATERIALIZED (
+                    SELECT j.platform,j.kind,j.status,j.due_at,
+                           {SUCCESSFUL_JOB_SQL} AS ever_succeeded
+                    FROM crawl_jobs j WHERE j.platform IN ({owned_filter})
+                )
+                SELECT platform,kind,count(*) AS total,
+                    sum(ever_succeeded) AS ever_succeeded,
+                    sum(NOT ever_succeeded AND status IN ('pending','retry','blocked','leased')) AS first_pass_remaining,
+                    sum(NOT ever_succeeded AND status IN ('pending','retry','blocked') AND due_at<=?) AS due_first_pass,
+                    sum(ever_succeeded AND status IN ('pending','retry','blocked') AND due_at<=?) AS due_refresh,
+                    sum(ever_succeeded AND status IN ('pending','retry','blocked') AND due_at>?) AS waiting_refresh,
+                    sum(status IN ('retry','blocked') AND due_at<=?) AS due_retry,
+                    sum(status='gone') AS gone,
+                    sum(status='invalid') AS invalid,
+                    min(CASE WHEN status IN ('retry','blocked') THEN due_at END) AS next_retry_at
+                FROM progress GROUP BY platform,kind ORDER BY platform,kind
+            """, [*owned, now, now, now, now])]
         scope = conn.execute("SELECT value FROM crawl_meta WHERE key='collection_scope'").fetchone()
         return {"collection_scope": scope[0] if scope else "legacy_with_chapters", "initialized": bool(conn.execute("SELECT 1 FROM crawl_meta WHERE key='initialized'").fetchone()), "counts": counts, "jobs": jobs,
                 "distribution_plan": plan, "node_id": node, "owned_platforms": owned,
                 "owned_jobs": [group for group in jobs if group["platform"] in owned],
+                "owned_counts": owned_counts, "owned_progress": owned_progress,
                 "works_by_platform": [dict(r) for r in conn.execute("SELECT platform,count(*) AS count FROM crawl_works GROUP BY platform")],
                 "unresolved_catalog": unresolved + invalid_catalog,
                 "blocked_jobs": conn.execute("SELECT count(*) FROM crawl_jobs WHERE status='blocked'").fetchone()[0],
